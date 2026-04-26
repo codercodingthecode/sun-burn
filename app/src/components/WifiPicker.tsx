@@ -25,19 +25,6 @@ function SignalIcon(props: { bars: number; secured: boolean }) {
   )
 }
 
-async function requestLocationThenScan(): Promise<WifiNetwork[]> {
-  // Request Location permission via browser Geolocation API.
-  // macOS requires this for apps to read WiFi SSIDs via system_profiler.
-  await new Promise<void>((resolve) => {
-    navigator.geolocation.getCurrentPosition(
-      () => resolve(),
-      () => resolve(), // proceed even if denied — scan will return what it can
-      { timeout: 3000 }
-    )
-  })
-  return invoke<WifiNetwork[]>('scan_wifi_networks')
-}
-
 const WifiPicker: Component<Props> = (props) => {
   const [networks, setNetworks] = createSignal<WifiNetwork[]>([])
   const [scanning, setScanning] = createSignal(true)
@@ -46,8 +33,8 @@ const WifiPicker: Component<Props> = (props) => {
   createEffect(async () => {
     setScanning(true)
     try {
-      const result = await requestLocationThenScan()
-      setNetworks(result.filter(n => n.ssid && n.ssid !== '<redacted>'))
+      const result = await invoke<WifiNetwork[]>('scan_wifi_networks')
+      setNetworks(result)
     } catch (err) {
       console.error('WiFi scan failed:', err)
     } finally {

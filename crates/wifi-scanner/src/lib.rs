@@ -42,14 +42,18 @@ pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
 
 #[cfg(target_os = "macos")]
 fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
-    use std::process::Command;
-
-    let output = Command::new("system_profiler")
-        .arg("SPAirPortDataType")
-        .output()?;
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_system_profiler_output(&text)
+    let results = wifi_scan::scan().map_err(|e| WifiError::Parse(e.to_string()))?;
+    let networks = results
+        .into_iter()
+        .filter(|w| !w.ssid.is_empty())
+        .map(|w| WifiNetwork {
+            ssid: w.ssid,
+            signal_strength: w.signal_level,
+            secured: !w.security.is_empty() && w.security != vec![wifi_scan::WifiSecurity::Open],
+            frequency_ghz: None,
+        })
+        .collect();
+    Ok(networks)
 }
 
 #[cfg(target_os = "macos")]
