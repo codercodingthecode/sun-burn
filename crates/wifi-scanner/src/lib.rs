@@ -171,26 +171,24 @@ pub(crate) fn parse_nmcli_output(text: &str) -> Result<Vec<WifiNetwork>, WifiErr
     let mut networks = Vec::new();
 
     for line in text.lines() {
-        // nmcli -t separates fields with ':' but SSIDs may contain ':'
-        // Format: SSID:SIGNAL:SECURITY
-        // We split from the right to isolate SECURITY and SIGNAL
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        // nmcli -t escapes ':' in SSIDs as '\:'. Replace escaped colons with a
+        // placeholder before splitting so they don't get treated as field delimiters.
+        const PLACEHOLDER: &str = "\x00";
+        let sanitized = line.replace("\\:", PLACEHOLDER);
+        let parts: Vec<&str> = sanitized.splitn(3, ':').collect();
         if parts.len() < 3 {
             continue;
         }
-        // With -t and these 3 fields: parts[0]=SSID, parts[1]=SIGNAL, parts[2]=SECURITY
-        // But SSID itself may have been split — nmcli escapes ':' as '\:'
-        // splitn(3,...) keeps any ':' in the security field together; SSID comes first.
-        let ssid = parts[0].trim().replace("\\:", ":").to_string();
+
+        let ssid = parts[0].trim().replace(PLACEHOLDER, ":").to_string();
         if ssid.is_empty() {
             continue;
         }
 
         let signal: i32 = parts[1].trim().parse().unwrap_or(0);
-        // Convert 0-100 percentage to approximate dBm: dBm ≈ signal/2 - 100
         let signal_strength = signal / 2 - 100;
 
-        let security = parts[2].trim();
+        let security = parts[2].trim().replace(PLACEHOLDER, ":");
         let secured = security != "--" && !security.is_empty();
 
         networks.push(WifiNetwork {

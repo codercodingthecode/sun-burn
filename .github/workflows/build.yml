@@ -23,7 +23,7 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
-          cache-dependency-path: app/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
       - name: Install Linux deps
         if: matrix.os == 'ubuntu-latest'
         run: |
