@@ -2,7 +2,6 @@ import { Component, createSignal, createEffect, For, Show } from 'solid-js'
 import { invoke } from '@tauri-apps/api/core'
 import { state, setState, goNext, goBack } from '../store'
 import type { Drive } from '../types'
-import { mockDrives } from '../mock'
 import DriveCard from '../components/DriveCard'
 
 const SelectDrive: Component = () => {
@@ -16,8 +15,8 @@ const SelectDrive: Component = () => {
     try {
       const result = await invoke<Drive[]>('list_removable_drives')
       setDrives(result)
-    } catch {
-      setDrives(mockDrives)
+    } catch (err) {
+      console.error('Drive scan failed:', err)
     } finally {
       setLoading(false)
       setRefreshing(false)

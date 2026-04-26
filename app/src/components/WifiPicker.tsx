@@ -1,7 +1,6 @@
 import { Component, createSignal, createEffect, For, Show } from 'solid-js'
 import { invoke } from '@tauri-apps/api/core'
 import type { WifiNetwork } from '../types'
-import { mockNetworks } from '../mock'
 
 interface Props {
   value: string
@@ -37,8 +36,8 @@ const WifiPicker: Component<Props> = (props) => {
     try {
       const result = await invoke<WifiNetwork[]>('scan_wifi_networks')
       setNetworks(result)
-    } catch {
-      setNetworks(mockNetworks)
+    } catch (err) {
+      console.error('WiFi scan failed:', err)
     } finally {
       setScanning(false)
     }

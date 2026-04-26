@@ -1,8 +1,8 @@
 import { Component, createSignal } from 'solid-js'
+import { open } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { setState, goNext, state } from '../store'
 import type { Manifest } from '../types'
-import { mockManifest } from '../mock'
 
 const SelectImage: Component = () => {
   const [loading, setLoading] = createSignal(false)
@@ -13,34 +13,23 @@ const SelectImage: Component = () => {
     setLoading(true)
 
     try {
-      // Try Tauri open_file_dialog command (registered in backend) or fall back to mock
-      let filePath: string | null = null
-      try {
-        filePath = await invoke<string | null>('open_file_dialog')
-      } catch {
-        // Backend not running or dialog not exposed — use a mock path for development
-        filePath = '/mock/solar-monitor.img'
-      }
+      const filePath = await open({
+        title: 'Select image file',
+        filters: [{ name: 'Disk Images', extensions: ['img', 'iso', 'zip', 'gz', 'xz'] }],
+        multiple: false,
+        directory: false,
+      })
 
       if (!filePath) {
         setLoading(false)
         return
       }
 
-      setState('imagePath', filePath)
+      setState('imagePath', filePath as string)
 
-      // Try to read the manifest
-      let manifest: Manifest | null = null
-      try {
-        manifest = await invoke<Manifest | null>('read_manifest', { imagePath: filePath })
-      } catch {
-        // Backend not running — use mock manifest for development
-        manifest = mockManifest
-      }
-
+      const manifest = await invoke<Manifest | null>('read_manifest', { imagePath: filePath })
       setState('manifest', manifest)
 
-      // Pre-populate defaults
       if (manifest) {
         for (const step of manifest.steps) {
           for (const field of step.fields) {
