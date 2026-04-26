@@ -63,7 +63,7 @@ const Flashing: Component = () => {
         addLog('Configuration written.')
       }
 
-      addLog(`Unmounting ${state.selectedDrive?.path}…`)
+      addLog(`Staging image and unmounting ${state.selectedDrive?.path}…`)
       addLog('Requesting admin password to write to disk…')
 
       const unlisten = await listen<FlashProgress>('flash-progress', (event) => {

@@ -109,35 +109,36 @@ impl Flasher {
 
         let disk = &self.dest_path;
         let raw_dest = to_raw_device(disk);
-        let src = self.source_path.display().to_string();
 
         // Unmount the volumes on the disk before writing (no admin needed)
         let _ = std::process::Command::new("diskutil")
             .args(["unmountDisk", disk])
             .output();
 
-        // Write the dd shell script to a temp file. Embedding paths in the
-        // shell script avoids the AppleScript escaping nightmare. We also
-        // write progress to a separate file (/tmp/sunburn-progress-PID) that
-        // a polling thread reads.
         let pid = std::process::id();
         let script_path = format!("/tmp/sunburn-flash-{}.sh", pid);
         let progress_path = format!("/tmp/sunburn-progress-{}", pid);
+        let staged_image = format!("/tmp/sunburn-image-{}.img", pid);
         let _ = std::fs::remove_file(&progress_path);
+
+        // macOS TCC blocks osascript-elevated processes from reading user data
+        // directories (Downloads, Documents, Desktop). Stage the image into /tmp
+        // (no TCC restriction) so root-dd can read it.
+        std::fs::copy(&self.source_path, &staged_image).map_err(FlashError::Io)?;
+        let src = staged_image.clone();
 
         let script = format!(
             r#"#!/bin/sh
-set -e
 PROGRESS_FILE="{progress_path}"
+: > "$PROGRESS_FILE"
 dd if="{src}" of="{raw_dest}" bs=4m 2>>"$PROGRESS_FILE" &
 DD_PID=$!
-while kill -0 $DD_PID 2>/dev/null; do
+while kill -0 "$DD_PID" 2>/dev/null; do
   sleep 1
-  kill -INFO $DD_PID 2>/dev/null || true
+  kill -INFO "$DD_PID" 2>/dev/null
 done
-wait $DD_PID
-DD_EXIT=$?
-exit $DD_EXIT
+wait "$DD_PID"
+exit $?
 "#,
             progress_path = progress_path,
             src = src,
@@ -216,21 +217,32 @@ exit $DD_EXIT
             .output()
             .map_err(FlashError::Io)?;
 
-        // Stop the poller and clean up
+        // Stop the poller
         stop.store(true, Ordering::Relaxed);
         let _ = poll_handle.join();
+
+        // Read dd's stderr from the progress file before cleanup
+        let dd_stderr = std::fs::read_to_string(&progress_path).unwrap_or_default();
         let _ = std::fs::remove_file(&script_path);
         let _ = std::fs::remove_file(&progress_path);
+        let _ = std::fs::remove_file(&staged_image);
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let osa_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             // osascript exits 1 if user cancels admin prompt
-            if stderr.contains("User canceled") || stderr.contains("(-128)") {
+            if osa_stderr.contains("User canceled") || osa_stderr.contains("(-128)") {
                 return Err(FlashError::PermissionDenied("admin auth cancelled".into()));
             }
+            // Pull the actual dd error from the progress file (last non-progress line)
+            let dd_err = dd_stderr
+                .lines()
+                .filter(|l| !l.contains("bytes transferred") && !l.contains("records"))
+                .filter(|l| !l.trim().is_empty())
+                .last()
+                .unwrap_or("(no error output)");
             return Err(FlashError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("dd failed: {}", stderr.trim()),
+                format!("dd: {} — osa: {}", dd_err.trim(), osa_stderr.trim()),
             )));
         }
 
