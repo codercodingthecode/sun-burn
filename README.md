@@ -101,10 +101,11 @@ Full specification: [`docs/sunburn-manifest-spec.md`](docs/sunburn-manifest-spec
 
 ## Screenshots
 
-_(screenshots coming soon)_
-
 <img src="docs/screenshots/select-image.png" alt="Select image screen" width="700">
-<img src="docs/screenshots/wizard-network.png" alt="Network setup wizard" width="700">
+<img src="docs/screenshots/network-setup.png" alt="Network setup wizard" width="700">
+<img src="docs/screenshots/device.png" alt="Device configuration" width="700">
+<img src="docs/screenshots/access.png" alt="Access and SSH configuration" width="700">
+<img src="docs/screenshots/confirm.png" alt="Confirm and flash" width="700">
 <img src="docs/screenshots/flashing.png" alt="Flash progress" width="700">
 
 ---

@@ -416,6 +416,19 @@ body {
   color: var(--accent);
 }
 
+.screenshot-img {
+  width: 100%;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  display: block;
+  transition: border-color 0.15s, transform 0.15s;
+}
+
+.screenshot-img:hover {
+  border-color: var(--accent);
+  transform: scale(1.01);
+}
+
 /* ---- Download ---- */
 
 .platform-grid {
