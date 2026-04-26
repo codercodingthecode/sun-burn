@@ -40,26 +40,26 @@ pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
 
 // ── macOS ─────────────────────────────────────────────────────────────────────
 //
-// macOS 15+ enforces Location permission before disclosing SSIDs via any
-// CoreWLAN or system_profiler API (CWNetwork.ssid returns nil, system_profiler
-// returns "<redacted>").  The only way to get real SSIDs without Location
-// permission is `networksetup -listpreferredwirelessnetworks <iface>`, which
-// returns the user's saved/known networks.  This is the right list for the
-// "pick a network to configure your device for" use-case anyway.
+// macOS 15+ requires Location permission for CoreWLAN to disclose real SSIDs.
+// The frontend triggers the permission dialog via navigator.geolocation
+// (granted to the bundle ID, which propagates to the Rust backend).
+// Once granted, wifi_scan (CoreWLAN) returns real nearby networks with RSSI.
 
 #[cfg(target_os = "macos")]
 fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
-    use std::process::Command;
-
-    // Find the WiFi interface (usually en0, but discover it dynamically).
-    let iface = find_wifi_interface().unwrap_or_else(|| "en0".to_string());
-
-    let output = Command::new("networksetup")
-        .args(["-listpreferredwirelessnetworks", &iface])
-        .output()?;
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    parse_preferred_networks_output(&text)
+    let results = wifi_scan::scan().map_err(|e| WifiError::Parse(e.to_string()))?;
+    let networks = results
+        .into_iter()
+        .filter(|w| !w.ssid.is_empty())
+        .map(|w| WifiNetwork {
+            ssid: w.ssid,
+            signal_strength: w.signal_level,
+            secured: !w.security.is_empty()
+                && !w.security.iter().all(|s| matches!(s, wifi_scan::WifiSecurity::Open)),
+            frequency_ghz: None,
+        })
+        .collect();
+    Ok(networks)
 }
 
 /// Parses the WiFi interface name from `networksetup -listallhardwareports`.

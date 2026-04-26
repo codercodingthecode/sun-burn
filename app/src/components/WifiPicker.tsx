@@ -34,6 +34,19 @@ const WifiPicker: Component<Props> = (props) => {
   createEffect(async () => {
     setScanning(true)
     try {
+      // macOS 15+ requires Location permission for CoreWLAN to disclose real
+      // SSIDs. Trigger the OS permission dialog via the Geolocation API; the
+      // grant applies to the whole bundle (including the Rust backend that
+      // calls CoreWLAN), so subsequent scans return real networks.
+      if (navigator.geolocation) {
+        await new Promise<void>((resolve) => {
+          navigator.geolocation.getCurrentPosition(
+            () => resolve(),
+            () => resolve(),
+            { timeout: 10000, enableHighAccuracy: false }
+          )
+        })
+      }
       const result = await invoke<WifiNetwork[]>('scan_wifi_networks')
       setNetworks(result)
     } catch (err) {
