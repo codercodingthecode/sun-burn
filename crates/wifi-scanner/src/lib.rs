@@ -39,122 +39,97 @@ pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
 }
 
 // ── macOS ─────────────────────────────────────────────────────────────────────
+//
+// macOS 15+ enforces Location permission before disclosing SSIDs via any
+// CoreWLAN or system_profiler API (CWNetwork.ssid returns nil, system_profiler
+// returns "<redacted>").  The only way to get real SSIDs without Location
+// permission is `networksetup -listpreferredwirelessnetworks <iface>`, which
+// returns the user's saved/known networks.  This is the right list for the
+// "pick a network to configure your device for" use-case anyway.
 
 #[cfg(target_os = "macos")]
 fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
-    let results = wifi_scan::scan().map_err(|e| WifiError::Parse(e.to_string()))?;
-    let networks = results
-        .into_iter()
-        .filter(|w| !w.ssid.is_empty())
-        .map(|w| WifiNetwork {
-            ssid: w.ssid,
-            signal_strength: w.signal_level,
-            secured: !w.security.is_empty() && w.security != vec![wifi_scan::WifiSecurity::Open],
-            frequency_ghz: None,
-        })
-        .collect();
-    Ok(networks)
+    use std::process::Command;
+
+    // Find the WiFi interface (usually en0, but discover it dynamically).
+    let iface = find_wifi_interface().unwrap_or_else(|| "en0".to_string());
+
+    let output = Command::new("networksetup")
+        .args(["-listpreferredwirelessnetworks", &iface])
+        .output()?;
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_preferred_networks_output(&text)
 }
 
+/// Parses the WiFi interface name from `networksetup -listallhardwareports`.
+/// Returns `None` if no Wi-Fi interface is found.
 #[cfg(target_os = "macos")]
-pub(crate) fn parse_system_profiler_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
-    // system_profiler SPAirPortDataType output (macOS 15+):
-    //
-    //   Current Network Information:
-    //     MyNetwork:
-    //       Security: WPA2 Personal
-    //       Signal / Noise: -54 dBm / -88 dBm
-    //       Channel: 157 (5GHz, 80MHz)
-    //   Other Local Wi-Fi Networks:
-    //     AnotherNet:
-    //       Security: WPA2 Personal
-    //       Signal / Noise: -67 dBm / -94 dBm
-    //       Channel: 6 (2GHz, 40MHz)
-    //
-    // Network names: lines ending with ':' that have no value after the colon,
-    // at exactly 4 spaces indent inside a network block.
+pub(crate) fn find_wifi_interface() -> Option<String> {
+    use std::process::Command;
 
-    let mut networks = Vec::new();
-    let mut in_networks = false;
-    let mut current_ssid: Option<String> = None;
-    let mut current_signal: i32 = 0;
-    let mut current_secured = true;
-    let mut current_freq: Option<f32> = None;
+    let output = Command::new("networksetup")
+        .args(["-listallhardwareports"])
+        .output()
+        .ok()?;
 
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_wifi_interface_from_hardware_ports(&text)
+}
+
+/// Pure parser for `networksetup -listallhardwareports` output.
+/// Looks for the block whose Hardware Port is "Wi-Fi" and returns its Device.
+#[cfg(target_os = "macos")]
+pub(crate) fn parse_wifi_interface_from_hardware_ports(text: &str) -> Option<String> {
+    let mut in_wifi_block = false;
     for line in text.lines() {
         let trimmed = line.trim();
-
-        // Enter network listing sections
-        if trimmed == "Current Network Information:" || trimmed == "Other Local Wi-Fi Networks:" {
-            in_networks = true;
-            continue;
-        }
-
-        // Exit network section when we hit a non-indented or shallowly-indented line
-        if in_networks && !line.starts_with("      ") && !trimmed.is_empty() {
-            if let Some(ssid) = current_ssid.take() {
-                networks.push(WifiNetwork { ssid, signal_strength: current_signal, secured: current_secured, frequency_ghz: current_freq });
-            }
-            in_networks = false;
-            continue;
-        }
-
-        if !in_networks {
-            continue;
-        }
-
-        // Network name: indented, ends with ':', no value after colon
-        if line.starts_with("            ") && !line.starts_with("              ") && trimmed.ends_with(':') {
-            if let Some(ssid) = current_ssid.take() {
-                networks.push(WifiNetwork { ssid, signal_strength: current_signal, secured: current_secured, frequency_ghz: current_freq });
-            }
-            let name = trimmed.trim_end_matches(':').to_string();
-            if !name.is_empty() {
-                current_ssid = Some(name);
-                current_signal = 0;
-                current_secured = true;
-                current_freq = None;
-            }
-            continue;
-        }
-
-        if current_ssid.is_none() {
-            continue;
-        }
-
-        // Signal / Noise: -54 dBm / -88 dBm
-        if trimmed.starts_with("Signal / Noise:") {
-            if let Some(rest) = trimmed.strip_prefix("Signal / Noise:") {
-                let dbm = rest.trim().split_whitespace().next().unwrap_or("0");
-                current_signal = dbm.parse().unwrap_or(0);
-            }
-            continue;
-        }
-
-        // Security: WPA2 Personal / None / Open
-        if trimmed.starts_with("Security:") {
-            let sec = trimmed.trim_start_matches("Security:").trim();
-            current_secured = !sec.eq_ignore_ascii_case("none") && !sec.eq_ignore_ascii_case("open");
-            continue;
-        }
-
-        // Channel: 157 (5GHz, 80MHz) or Channel: 6 (2GHz, 40MHz)
-        if trimmed.starts_with("Channel:") {
-            let ch_str = trimmed.trim_start_matches("Channel:").trim();
-            if ch_str.contains("5GHz") {
-                current_freq = Some(5.0);
-            } else if ch_str.contains("2GHz") {
-                current_freq = Some(2.4);
-            }
-            continue;
+        if trimmed.starts_with("Hardware Port:") {
+            let port = trimmed["Hardware Port:".len()..].trim();
+            in_wifi_block = port.eq_ignore_ascii_case("wi-fi")
+                || port.eq_ignore_ascii_case("airport");
+        } else if in_wifi_block && trimmed.starts_with("Device:") {
+            return Some(trimmed["Device:".len()..].trim().to_string());
         }
     }
+    None
+}
 
-    // Flush last network
-    if let Some(ssid) = current_ssid.take() {
-        networks.push(WifiNetwork { ssid, signal_strength: current_signal, secured: current_secured, frequency_ghz: current_freq });
+/// Parses `networksetup -listpreferredwirelessnetworks <iface>` output.
+///
+/// Output format:
+///   Preferred networks on en0:
+///   \t<ssid1>
+///   \t<ssid2>
+///   ...
+///
+/// Each SSID is tab-indented.  The first line is a header.
+/// Signal strength is unknown (0) because macOS redacts RSSI from this
+/// command — the list is already sorted by preference/recency.
+#[cfg(target_os = "macos")]
+pub(crate) fn parse_preferred_networks_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
+    let mut networks = Vec::new();
+    for line in text.lines() {
+        // Header line: "Preferred networks on en0:" — skip it.
+        if line.starts_with("Preferred networks") {
+            continue;
+        }
+        // Each SSID is tab-indented.
+        let ssid = line.trim_start_matches('\t').trim();
+        if ssid.is_empty() {
+            continue;
+        }
+        networks.push(WifiNetwork {
+            ssid: ssid.to_string(),
+            // RSSI is unavailable without Location permission.
+            // Use 0 as a neutral sentinel; the UI should suppress the dBm label for 0.
+            signal_strength: 0,
+            // Security info is also unavailable from this command.
+            // Default to secured=true as a conservative assumption for the UI.
+            secured: true,
+            frequency_ghz: None,
+        });
     }
-
     Ok(networks)
 }
 
@@ -381,62 +356,62 @@ fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
 mod tests {
     use super::*;
 
-    // ── macOS system_profiler parsing ────────────────────────────────────────
-
-    #[cfg(target_os = "macos")]
-    fn mock_profiler_output() -> &'static str {
-        concat!(
-            "Wi-Fi:\n\n",
-            "      Interfaces:\n",
-            "        en0:\n",
-            "          Status: Connected\n",
-            "          Current Network Information:\n",
-            "            HomeNetwork:\n",
-            "              PHY Mode: 802.11ax\n",
-            "              Channel: 157 (5GHz, 80MHz)\n",
-            "              Security: WPA2 Personal\n",
-            "              Signal / Noise: -45 dBm / -90 dBm\n",
-            "          Other Local Wi-Fi Networks:\n",
-            "            OpenCafe:\n",
-            "              Channel: 6 (2GHz, 40MHz)\n",
-            "              Security: None\n",
-            "              Signal / Noise: -60 dBm / -88 dBm\n",
-            "            Office5G:\n",
-            "              Channel: 36 (5GHz, 80MHz)\n",
-            "              Security: WPA3 Personal\n",
-            "              Signal / Noise: -70 dBm / -92 dBm\n",
-        )
-    }
+    // ── macOS preferred-networks parsing ─────────────────────────────────────
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn profiler_parses_secured_and_open() {
-        let nets = parse_system_profiler_output(mock_profiler_output()).unwrap();
+    fn preferred_networks_parses_list() {
+        let input = "Preferred networks on en0:\n\tHomeNetwork\n\tOpenCafe\n\tOffice5G\n";
+        let nets = parse_preferred_networks_output(input).unwrap();
         assert_eq!(nets.len(), 3);
-        let home = nets.iter().find(|n| n.ssid == "HomeNetwork").unwrap();
-        assert_eq!(home.signal_strength, -45);
-        assert!(home.secured);
-        assert_eq!(home.frequency_ghz, Some(5.0));
-        let cafe = nets.iter().find(|n| n.ssid == "OpenCafe").unwrap();
-        assert_eq!(cafe.signal_strength, -60);
-        assert!(!cafe.secured);
-        assert_eq!(cafe.frequency_ghz, Some(2.4));
+        assert_eq!(nets[0].ssid, "HomeNetwork");
+        assert_eq!(nets[1].ssid, "OpenCafe");
+        assert_eq!(nets[2].ssid, "Office5G");
+        // Signal is 0 (RSSI unavailable without Location)
+        assert_eq!(nets[0].signal_strength, 0);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn profiler_empty_returns_empty() {
-        let nets = parse_system_profiler_output("").unwrap();
+    fn preferred_networks_empty_returns_empty() {
+        let nets = parse_preferred_networks_output("").unwrap();
         assert!(nets.is_empty());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn profiler_wpa3_is_secured() {
-        let nets = parse_system_profiler_output(mock_profiler_output()).unwrap();
-        let office = nets.iter().find(|n| n.ssid == "Office5G").unwrap();
-        assert!(office.secured);
-        assert_eq!(office.frequency_ghz, Some(5.0));
+    fn preferred_networks_skips_empty_lines() {
+        let input = "Preferred networks on en0:\n\tMyNet\n\n\tOtherNet\n";
+        let nets = parse_preferred_networks_output(input).unwrap();
+        assert_eq!(nets.len(), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hardware_ports_finds_wifi_interface() {
+        let input = concat!(
+            "Hardware Port: Ethernet\nDevice: en1\nEthernet Address: aa:bb:cc:dd:ee:ff\n\n",
+            "Hardware Port: Wi-Fi\nDevice: en0\nEthernet Address: f4:d4:88:79:c9:d5\n\n",
+            "Hardware Port: Bluetooth PAN\nDevice: en3\n",
+        );
+        let iface = parse_wifi_interface_from_hardware_ports(input);
+        assert_eq!(iface, Some("en0".to_string()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hardware_ports_airport_alias_works() {
+        let input = "Hardware Port: AirPort\nDevice: en0\nEthernet Address: f4:d4:88:79:c9:d5\n";
+        let iface = parse_wifi_interface_from_hardware_ports(input);
+        assert_eq!(iface, Some("en0".to_string()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn hardware_ports_no_wifi_returns_none() {
+        let input = "Hardware Port: Ethernet\nDevice: en1\nEthernet Address: aa:bb:cc:dd:ee:ff\n";
+        let iface = parse_wifi_interface_from_hardware_ports(input);
+        assert!(iface.is_none());
     }
 
     // ── Linux nmcli parsing ───────────────────────────────────────────────────

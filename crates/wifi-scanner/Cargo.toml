@@ -6,6 +6,3 @@ edition = "2021"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "1"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-wifi_scan = "0.7"

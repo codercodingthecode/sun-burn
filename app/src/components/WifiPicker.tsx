@@ -8,6 +8,7 @@ interface Props {
 }
 
 function signalBars(strength: number): number {
+  if (strength === 0) return 0   // unknown (no Location permission on macOS)
   if (strength >= -55) return 4
   if (strength >= -65) return 3
   if (strength >= -75) return 2
@@ -79,7 +80,7 @@ const WifiPicker: Component<Props> = (props) => {
               >
                 <SignalIcon bars={signalBars(net.signal_strength)} secured={net.secured} />
                 <span class="wifi-ssid">{net.ssid}</span>
-                <span class="wifi-meta">{net.signal_strength} dBm{net.frequency_ghz ? ` · ${net.frequency_ghz} GHz` : ''}</span>
+                <span class="wifi-meta">{net.signal_strength !== 0 ? `${net.signal_strength} dBm` : ''}{net.frequency_ghz ? ` · ${net.frequency_ghz} GHz` : ''}</span>
               </button>
             )}
           </For>
