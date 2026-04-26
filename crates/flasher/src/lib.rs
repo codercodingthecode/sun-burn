@@ -36,6 +36,15 @@ pub struct Flasher {
     dest_path: String,
 }
 
+/// Parse "N bytes transferred" from a dd SIGINFO output line.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn parse_dd_bytes(line: &str) -> Option<u64> {
+    let idx = line.find(" bytes")?;
+    let prefix = &line[..idx];
+    let token = prefix.split_whitespace().last()?;
+    token.parse::<u64>().ok()
+}
+
 /// Convert a macOS block-device path to its raw (character-device) equivalent.
 /// `/dev/diskN` → `/dev/rdiskN`; other paths are returned unchanged.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -57,7 +66,7 @@ impl Flasher {
 
     pub fn flash<F>(&self, on_progress: F) -> Result<(), FlashError>
     where
-        F: Fn(FlashProgress) + Send + 'static,
+        F: Fn(FlashProgress) + Send + Sync + 'static,
     {
         if !self.source_path.exists() {
             return Err(FlashError::SourceNotFound(self.source_path.clone()));
@@ -92,42 +101,107 @@ impl Flasher {
     #[cfg(target_os = "macos")]
     fn flash_macos<F>(&self, total_bytes: u64, on_progress: F) -> Result<(), FlashError>
     where
-        F: Fn(FlashProgress) + Send + 'static,
+        F: Fn(FlashProgress) + Send + Sync + 'static,
     {
+        use std::io::{BufRead, BufReader};
+        use std::process::Stdio;
+        use std::sync::Arc;
+
         // Unmount the disk before writing
         let disk = &self.dest_path;
-        let unmount_output = std::process::Command::new("diskutil")
+        let _ = std::process::Command::new("diskutil")
             .args(["unmountDisk", disk])
-            .output()
-            .map_err(|e| FlashError::UnmountFailed(e.to_string()))?;
+            .output();
 
-        if !unmount_output.status.success() {
-            let stderr = String::from_utf8_lossy(&unmount_output.stderr).into_owned();
-            return Err(FlashError::UnmountFailed(stderr));
-        }
-
-        // Convert /dev/diskN to /dev/rdiskN for raw (faster) access
         let raw_dest = to_raw_device(disk);
+        let src = self.source_path.display().to_string();
 
-        let dest_exists = Path::new(&raw_dest).exists();
-        if !dest_exists {
-            return Err(FlashError::DestinationNotFound(raw_dest.clone()));
+        // Use osascript to elevate `dd` with admin privileges. Pipe stderr to
+        // capture dd's status output (one line per progress sample).
+        // We use bs=4m and status=progress (or fallback to SIGINFO).
+        // Spawn a long-running shell where we can SIGINFO the dd PID periodically
+        // to print progress to stderr, which we parse.
+        let script = format!(
+            r#"sh -c 'dd if="{src}" of="{raw_dest}" bs=4m & DD_PID=$!; \
+while kill -0 $DD_PID 2>/dev/null; do \
+sleep 1; \
+kill -INFO $DD_PID 2>/dev/null; \
+done; \
+wait $DD_PID'"#,
+            src = src.replace('"', r#"\""#),
+            raw_dest = raw_dest,
+        );
+
+        let osascript_arg = format!(
+            r#"do shell script "{}" with administrator privileges"#,
+            script.replace('\\', r"\\").replace('"', r#"\""#)
+        );
+
+        let on_progress = Arc::new(on_progress);
+
+        let mut child = std::process::Command::new("osascript")
+            .args(["-e", &osascript_arg])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| FlashError::Io(e))?;
+
+        // Initial progress so UI shows it started
+        on_progress(FlashProgress {
+            bytes_written: 0,
+            total_bytes,
+            speed_bps: 0,
+        });
+
+        // Parse dd SIGINFO output from stderr. dd prints lines like:
+        //   "1234567 bytes transferred in 1.2 secs (1023456 bytes/sec)"
+        // or "100+0 records in / 100+0 records out / 419430400 bytes transferred…"
+        if let Some(stderr) = child.stderr.take() {
+            let cb = Arc::clone(&on_progress);
+            let total = total_bytes;
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                let mut last_bytes: u64 = 0;
+                let mut last_time = std::time::Instant::now();
+                for line in reader.lines().flatten() {
+                    if let Some(bytes) = parse_dd_bytes(&line) {
+                        let now = std::time::Instant::now();
+                        let elapsed = now.duration_since(last_time).as_secs_f64();
+                        let speed = if elapsed > 0.0 && bytes > last_bytes {
+                            ((bytes - last_bytes) as f64 / elapsed) as u64
+                        } else {
+                            0
+                        };
+                        last_bytes = bytes;
+                        last_time = now;
+                        cb(FlashProgress {
+                            bytes_written: bytes,
+                            total_bytes: total,
+                            speed_bps: speed,
+                        });
+                    }
+                }
+            });
         }
 
-        let mut dest = OpenOptions::new()
-            .write(true)
-            .open(&raw_dest)
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    FlashError::PermissionDenied(raw_dest.clone())
-                } else {
-                    FlashError::Io(e)
-                }
-            })?;
+        let status = child.wait().map_err(|e| FlashError::Io(e))?;
 
-        self.write_with_progress(total_bytes, &mut dest, on_progress)?;
+        if !status.success() {
+            // osascript exits 1 if user cancels admin prompt
+            return Err(FlashError::PermissionDenied(format!(
+                "admin auth cancelled or dd failed (exit {})",
+                status.code().unwrap_or(-1)
+            )));
+        }
 
-        // Eject after writing
+        // Final progress
+        on_progress(FlashProgress {
+            bytes_written: total_bytes,
+            total_bytes,
+            speed_bps: 0,
+        });
+
+        // Eject
         let _ = std::process::Command::new("diskutil")
             .args(["eject", disk])
             .output();
@@ -138,7 +212,7 @@ impl Flasher {
     #[cfg(target_os = "linux")]
     fn flash_linux<F>(&self, total_bytes: u64, on_progress: F) -> Result<(), FlashError>
     where
-        F: Fn(FlashProgress) + Send + 'static,
+        F: Fn(FlashProgress) + Send + Sync + 'static,
     {
         // Sync before writing
         let _ = std::process::Command::new("sync").output();
@@ -170,7 +244,7 @@ impl Flasher {
     #[cfg(target_os = "windows")]
     fn flash_windows<F>(&self, total_bytes: u64, on_progress: F) -> Result<(), FlashError>
     where
-        F: Fn(FlashProgress) + Send + 'static,
+        F: Fn(FlashProgress) + Send + Sync + 'static,
     {
         let dest_path = &self.dest_path;
 

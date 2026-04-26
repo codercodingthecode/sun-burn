@@ -580,6 +580,28 @@ html, body, #root {
 .ssh-tab:first-child { border-right: 1px solid var(--border); }
 .ssh-tab--active { background: var(--amber-dim); color: var(--amber); font-weight: 500; }
 
+/* Password field with show/hide toggle */
+.password-field { position: relative; }
+.password-input { padding-right: 40px !important; }
+.password-toggle {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: color 0.15s, background 0.15s;
+}
+.password-toggle:hover { color: var(--text); background: var(--surface-hover); }
+.password-toggle:focus { outline: none; color: var(--amber); }
+
 .ssh-key-list { display: flex; flex-direction: column; gap: 4px; }
 .ssh-key-option {
   display: flex;
@@ -596,7 +618,8 @@ html, body, #root {
   transition: all 0.15s;
 }
 .ssh-key-option:hover { border-color: #3f3f46; background: var(--surface-hover); }
-.ssh-key-option--selected { border-color: var(--amber); background: var(--amber-dim2); }
+.ssh-key-option--selected,
+.ssh-key-option--selected:hover { border-color: var(--amber); background: var(--amber-dim2); }
 .ssh-key-name { font-size: 13px; font-weight: 500; }
 .ssh-key-preview { font-family: var(--mono); font-size: 10.5px; color: var(--text-secondary); }
 

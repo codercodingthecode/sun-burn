@@ -6,6 +6,40 @@ import WifiPicker from '../components/WifiPicker'
 import Toggle from '../components/Toggle'
 import { COUNTRIES, TIMEZONES } from '../mock'
 
+// Password input with show/hide toggle
+const PasswordField: Component<{ id: string; value: string; onChange: (v: string) => void }> = (props) => {
+  const [show, setShow] = createSignal(false)
+  return (
+    <div class="password-field">
+      <input
+        id={props.id}
+        type={show() ? 'text' : 'password'}
+        class="field-input password-input"
+        value={props.value}
+        onInput={(e) => props.onChange(e.currentTarget.value)}
+      />
+      <button
+        type="button"
+        class="password-toggle"
+        onClick={() => setShow(s => !s)}
+        aria-label={show() ? 'Hide password' : 'Show password'}
+        title={show() ? 'Hide' : 'Show'}
+      >
+        {show() ? (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 3l18 18M10.6 10.6a3 3 0 004.2 4.2M9.9 4.2A10.4 10.4 0 0112 4c5 0 9 4 10 8a13.4 13.4 0 01-3 4.4M6.6 6.6A13.6 13.6 0 002 12c1 4 5 8 10 8a10.4 10.4 0 005.4-1.5"/>
+          </svg>
+        ) : (
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        )}
+      </button>
+    </div>
+  )
+}
+
 // SSH public key files via Tauri FS (best-effort)
 async function readSshKeys(): Promise<{ name: string; content: string }[]> {
   try {
@@ -155,13 +189,7 @@ function FieldRenderer(props: { field: Field }) {
         )}
 
         {f.type === 'password' && (
-          <input
-            id={f.id}
-            type="password"
-            class="field-input"
-            value={value()}
-            onInput={(e) => set(e.currentTarget.value)}
-          />
+          <PasswordField id={f.id} value={value()} onChange={set} />
         )}
 
         {f.type === 'wifi-picker' && (

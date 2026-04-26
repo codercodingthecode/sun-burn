@@ -51,41 +51,43 @@ const Flashing: Component = () => {
     setState('flashProgress', null)
     setState('error', null)
 
-    addLog('Preparing image…')
-
-    if (state.manifest && Object.keys(state.fieldValues).length > 0) {
-      addLog('Applying configuration to boot partition…')
-      await invoke('patch_image', {
-        imagePath: state.imagePath,
-        values: state.fieldValues,
-      })
-      addLog('Configuration written.')
-    }
-
-    addLog(`Writing to ${state.selectedDrive?.display_name ?? state.selectedDrive?.path}…`)
-
-    const unlisten = await listen<FlashProgress>('flash-progress', (event) => {
-      setState('flashProgress', event.payload)
-      const p = event.payload
-      if (p.total_bytes > 0) {
-        const pctStr = Math.round((p.bytes_written / p.total_bytes) * 100)
-        addLog(`${formatBytes(p.bytes_written)} / ${formatBytes(p.total_bytes)} @ ${formatSpeed(p.speed_bps)} (${pctStr}%)`)
-      }
-    })
-
     try {
-      await invoke('flash_image', {
-        imagePath: state.imagePath,
-        drivePath: state.selectedDrive?.path,
-      })
-    } finally {
-      unlisten()
-    }
+      addLog('Preparing image…')
 
-    addLog('Finalizing…')
-    addLog('Done!')
-    await new Promise((r) => setTimeout(r, 800))
-    goNext()
+      if (state.manifest && Object.keys(state.fieldValues).length > 0) {
+        addLog('Applying configuration to boot partition…')
+        await invoke('patch_image', {
+          imagePath: state.imagePath,
+          values: state.fieldValues,
+        })
+        addLog('Configuration written.')
+      }
+
+      addLog(`Unmounting ${state.selectedDrive?.path}…`)
+      addLog('Requesting admin password to write to disk…')
+
+      const unlisten = await listen<FlashProgress>('flash-progress', (event) => {
+        setState('flashProgress', event.payload)
+      })
+
+      try {
+        await invoke('flash_image', {
+          imagePath: state.imagePath,
+          drivePath: state.selectedDrive?.path,
+        })
+      } finally {
+        unlisten()
+      }
+
+      addLog('Finalizing…')
+      addLog('Done!')
+      await new Promise((r) => setTimeout(r, 800))
+      goNext()
+    } catch (err) {
+      const msg = String(err)
+      addLog(`Error: ${msg}`)
+      setState('error', msg)
+    }
   })
 
   return (
