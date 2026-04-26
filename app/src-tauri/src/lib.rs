@@ -1,6 +1,6 @@
 pub mod commands;
 
-use commands::{devices, flash, manifest, wifi};
+use commands::{devices, flash, manifest, ssh, wifi};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,6 +10,7 @@ pub fn run() {
             manifest::read_manifest,
             wifi::scan_wifi_networks,
             devices::list_removable_drives,
+            ssh::list_ssh_keys,
             flash::patch_image,
             flash::flash_image,
         ])
