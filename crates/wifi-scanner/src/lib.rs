@@ -35,7 +35,7 @@ pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
     }
 
     networks.extend(best.into_values());
-    networks.sort_by(|a, b| b.signal_strength.cmp(&a.signal_strength));
+    networks.sort_by_key(|n| std::cmp::Reverse(n.signal_strength));
 }
 
 // ── macOS ─────────────────────────────────────────────────────────────────────

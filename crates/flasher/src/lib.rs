@@ -38,6 +38,7 @@ pub struct Flasher {
 
 /// Convert a macOS block-device path to its raw (character-device) equivalent.
 /// `/dev/diskN` → `/dev/rdiskN`; other paths are returned unchanged.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn to_raw_device(path: &str) -> String {
     if let Some(stripped) = path.strip_prefix("/dev/disk") {
         format!("/dev/rdisk{}", stripped)
