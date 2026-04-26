@@ -8,7 +8,6 @@ interface Props {
 }
 
 function signalBars(strength: number): number {
-  // strength is negative dBm; closer to 0 = stronger
   if (strength >= -55) return 4
   if (strength >= -65) return 3
   if (strength >= -75) return 2
@@ -35,7 +34,9 @@ const WifiPicker: Component<Props> = (props) => {
     setScanning(true)
     try {
       const result = await invoke<WifiNetwork[]>('scan_wifi_networks')
-      setNetworks(result)
+      // Filter out blank or redacted SSIDs (macOS returns these without Location permission)
+      const valid = result.filter(n => n.ssid && n.ssid !== '<redacted>' && n.ssid.trim() !== '')
+      setNetworks(valid)
     } catch (err) {
       console.error('WiFi scan failed:', err)
     } finally {
@@ -43,48 +44,51 @@ const WifiPicker: Component<Props> = (props) => {
     }
   })
 
-  const selected = () => networks().find((n) => n.ssid === props.value)
+  const visibleNetworks = () => networks()
+  const hasNetworks = () => visibleNetworks().length > 0
 
   return (
     <div class="wifi-picker">
-      <button
-        type="button"
-        class="wifi-trigger"
-        onClick={() => setOpen((o) => !o)}
-        disabled={scanning()}
-      >
-        <Show when={scanning()} fallback={
-          <Show when={selected()} fallback={<span class="placeholder">Select network…</span>}>
-            {(net) => (
-              <>
-                <SignalIcon bars={signalBars(net().signal_strength)} secured={net().secured} />
-                <span>{net().ssid}</span>
-              </>
-            )}
-          </Show>
-        }>
-          <span class="spinner" />
-          <span>Scanning…</span>
-        </Show>
-        <span class="chevron">{open() ? '▲' : '▼'}</span>
-      </button>
+      {/* Always-visible text input */}
+      <input
+        type="text"
+        class="wifi-text-input"
+        placeholder="Enter network name…"
+        value={props.value}
+        onInput={(e) => props.onChange(e.currentTarget.value)}
+      />
 
-      <Show when={open() && !scanning()}>
-        <div class="wifi-dropdown">
-          <For each={networks()} fallback={<div class="wifi-empty">No networks found</div>}>
-            {(net) => (
-              <button
-                type="button"
-                class={`wifi-option ${net.ssid === props.value ? 'wifi-option--selected' : ''}`}
-                onClick={() => { props.onChange(net.ssid); setOpen(false) }}
-              >
-                <SignalIcon bars={signalBars(net.signal_strength)} secured={net.secured} />
-                <span class="wifi-ssid">{net.ssid}</span>
-                <span class="wifi-meta">{net.signal_strength} dBm{net.frequency_ghz ? ` · ${net.frequency_ghz} GHz` : ''}</span>
-              </button>
-            )}
-          </For>
-        </div>
+      {/* Scan dropdown — shown when we have real results */}
+      <Show when={!scanning() && hasNetworks()}>
+        <button
+          type="button"
+          class="wifi-scan-toggle"
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open() ? '▲ Hide nearby networks' : `▼ Nearby networks (${visibleNetworks().length})`}
+        </button>
+
+        <Show when={open()}>
+          <div class="wifi-dropdown">
+            <For each={visibleNetworks()}>
+              {(net) => (
+                <button
+                  type="button"
+                  class={`wifi-option ${net.ssid === props.value ? 'wifi-option--selected' : ''}`}
+                  onClick={() => { props.onChange(net.ssid); setOpen(false) }}
+                >
+                  <SignalIcon bars={signalBars(net.signal_strength)} secured={net.secured} />
+                  <span class="wifi-ssid">{net.ssid}</span>
+                  <span class="wifi-meta">{net.signal_strength} dBm{net.frequency_ghz ? ` · ${net.frequency_ghz} GHz` : ''}</span>
+                </button>
+              )}
+            </For>
+          </div>
+        </Show>
+      </Show>
+
+      <Show when={scanning()}>
+        <span class="wifi-scanning-hint"><span class="spinner" /> Scanning for networks…</span>
       </Show>
     </div>
   )
