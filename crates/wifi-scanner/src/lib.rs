@@ -44,94 +44,111 @@ pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
 fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
     use std::process::Command;
 
-    let output = Command::new(
-        "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport",
-    )
-    .arg("-s")
-    .output()?;
+    let output = Command::new("system_profiler")
+        .arg("SPAirPortDataType")
+        .output()?;
 
     let text = String::from_utf8_lossy(&output.stdout);
-    parse_airport_output(&text)
+    parse_system_profiler_output(&text)
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn parse_airport_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
-    // airport -s output looks like:
-    //                             SSID BSSID             RSSI CHANNEL HT CC SECURITY (auth/unicast/group)
-    //                         MyNet01 aa:bb:cc:dd:ee:ff  -65  6       Y  US WPA2(PSK/AES/AES)
+pub(crate) fn parse_system_profiler_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
+    // system_profiler SPAirPortDataType output (macOS 15+):
     //
-    // SSID is right-justified into the first 32 chars, followed by a space and the rest.
-    // We detect the header line to find column offsets, then parse subsequent lines.
-
-    let mut lines = text.lines();
-
-    // Find the header line (contains "SSID" and "BSSID")
-    let header_line = loop {
-        match lines.next() {
-            None => return Ok(Vec::new()),
-            Some(l) if l.contains("SSID") && l.contains("BSSID") => break l,
-            _ => continue,
-        }
-    };
-
-    // Locate column start offsets from the header
-    let bssid_col = header_line.find("BSSID").unwrap_or(33);
-    let rssi_col = header_line.find("RSSI").unwrap_or(bssid_col + 18);
-    let security_col = header_line.find("SECURITY").unwrap_or(rssi_col + 30);
+    //   Current Network Information:
+    //     MyNetwork:
+    //       Security: WPA2 Personal
+    //       Signal / Noise: -54 dBm / -88 dBm
+    //       Channel: 157 (5GHz, 80MHz)
+    //   Other Local Wi-Fi Networks:
+    //     AnotherNet:
+    //       Security: WPA2 Personal
+    //       Signal / Noise: -67 dBm / -94 dBm
+    //       Channel: 6 (2GHz, 40MHz)
+    //
+    // Network names: lines ending with ':' that have no value after the colon,
+    // at exactly 4 spaces indent inside a network block.
 
     let mut networks = Vec::new();
+    let mut in_networks = false;
+    let mut current_ssid: Option<String> = None;
+    let mut current_signal: i32 = 0;
+    let mut current_secured = true;
+    let mut current_freq: Option<f32> = None;
 
-    for line in lines {
-        if line.trim().is_empty() {
+    for line in text.lines() {
+        let trimmed = line.trim();
+
+        // Enter network listing sections
+        if trimmed == "Current Network Information:" || trimmed == "Other Local Wi-Fi Networks:" {
+            in_networks = true;
             continue;
         }
 
-        // SSID occupies everything up to bssid_col, right-padded with spaces
-        if line.len() < bssid_col {
+        // Exit network section when we hit a non-indented or shallowly-indented line
+        if in_networks && !line.starts_with("      ") && !trimmed.is_empty() {
+            if let Some(ssid) = current_ssid.take() {
+                networks.push(WifiNetwork { ssid, signal_strength: current_signal, secured: current_secured, frequency_ghz: current_freq });
+            }
+            in_networks = false;
             continue;
         }
 
-        let ssid = line[..bssid_col].trim().to_string();
-        if ssid.is_empty() {
+        if !in_networks {
             continue;
         }
 
-        // RSSI: parse the number that appears at rssi_col
-        let rssi_str = if line.len() > rssi_col {
-            line[rssi_col..].split_whitespace().next().unwrap_or("0")
-        } else {
-            "0"
-        };
-        let signal_strength: i32 = rssi_str.parse().unwrap_or(0);
+        // Network name: indented, ends with ':', no value after colon
+        if line.starts_with("            ") && !line.starts_with("              ") && trimmed.ends_with(':') {
+            if let Some(ssid) = current_ssid.take() {
+                networks.push(WifiNetwork { ssid, signal_strength: current_signal, secured: current_secured, frequency_ghz: current_freq });
+            }
+            let name = trimmed.trim_end_matches(':').to_string();
+            if !name.is_empty() {
+                current_ssid = Some(name);
+                current_signal = 0;
+                current_secured = true;
+                current_freq = None;
+            }
+            continue;
+        }
 
-        // Security: last column
-        let security = if line.len() > security_col {
-            line[security_col..].split_whitespace().next().unwrap_or("NONE")
-        } else {
-            "NONE"
-        };
-        let secured = !security.eq_ignore_ascii_case("NONE");
+        if current_ssid.is_none() {
+            continue;
+        }
 
-        // Channel → rough frequency mapping
-        // Channels 1-14 → 2.4 GHz, 36+ → 5 GHz
-        let channel_str = {
-            let after_rssi = if line.len() > rssi_col { &line[rssi_col..] } else { "" };
-            let mut parts = after_rssi.split_whitespace();
-            parts.next(); // skip RSSI
-            parts.next().unwrap_or("").to_string()
-        };
-        let frequency_ghz = channel_str
-            .split(',')
-            .next()
-            .and_then(|c| c.trim().parse::<u32>().ok())
-            .map(|ch| if ch <= 14 { 2.4_f32 } else { 5.0_f32 });
+        // Signal / Noise: -54 dBm / -88 dBm
+        if trimmed.starts_with("Signal / Noise:") {
+            if let Some(rest) = trimmed.strip_prefix("Signal / Noise:") {
+                let dbm = rest.trim().split_whitespace().next().unwrap_or("0");
+                current_signal = dbm.parse().unwrap_or(0);
+            }
+            continue;
+        }
 
-        networks.push(WifiNetwork {
-            ssid,
-            signal_strength,
-            secured,
-            frequency_ghz,
-        });
+        // Security: WPA2 Personal / None / Open
+        if trimmed.starts_with("Security:") {
+            let sec = trimmed.trim_start_matches("Security:").trim();
+            current_secured = !sec.eq_ignore_ascii_case("none") && !sec.eq_ignore_ascii_case("open");
+            continue;
+        }
+
+        // Channel: 157 (5GHz, 80MHz) or Channel: 6 (2GHz, 40MHz)
+        if trimmed.starts_with("Channel:") {
+            let ch_str = trimmed.trim_start_matches("Channel:").trim();
+            if ch_str.contains("5GHz") {
+                current_freq = Some(5.0);
+            } else if ch_str.contains("2GHz") {
+                current_freq = Some(2.4);
+            }
+            continue;
+        }
+    }
+
+    // Flush last network
+    if let Some(ssid) = current_ssid.take() {
+        networks.push(WifiNetwork { ssid, signal_strength: current_signal, secured: current_secured, frequency_ghz: current_freq });
     }
 
     Ok(networks)
@@ -360,73 +377,62 @@ fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
 mod tests {
     use super::*;
 
-    // ── macOS airport parsing ─────────────────────────────────────────────────
-    //
-    // Column offsets derived from the actual airport -s header:
-    //   bssid_col=33  rssi_col=51  security_col=71
-    //
-    // Each data line must have content aligned to those columns.
+    // ── macOS system_profiler parsing ────────────────────────────────────────
+
+    #[cfg(target_os = "macos")]
+    fn mock_profiler_output() -> &'static str {
+        concat!(
+            "Wi-Fi:\n\n",
+            "      Interfaces:\n",
+            "        en0:\n",
+            "          Status: Connected\n",
+            "          Current Network Information:\n",
+            "            HomeNetwork:\n",
+            "              PHY Mode: 802.11ax\n",
+            "              Channel: 157 (5GHz, 80MHz)\n",
+            "              Security: WPA2 Personal\n",
+            "              Signal / Noise: -45 dBm / -90 dBm\n",
+            "          Other Local Wi-Fi Networks:\n",
+            "            OpenCafe:\n",
+            "              Channel: 6 (2GHz, 40MHz)\n",
+            "              Security: None\n",
+            "              Signal / Noise: -60 dBm / -88 dBm\n",
+            "            Office5G:\n",
+            "              Channel: 36 (5GHz, 80MHz)\n",
+            "              Security: WPA3 Personal\n",
+            "              Signal / Noise: -70 dBm / -92 dBm\n",
+        )
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn airport_parses_secured_and_open() {
-        // Header line (verbatim airport -s format), followed by two data lines
-        // constructed to align with bssid_col=33, rssi_col=51, security_col=71.
-        let input = concat!(
-            "                            SSID BSSID             RSSI CHANNEL HT  CC SECURITY (auth/unicast/group)\n",
-            "                     HomeNetwork aa:bb:cc:dd:ee:ff  -45       6  Y  US WPA2(PSK/AES/AES)\n",
-            "                        OpenCafe 11:22:33:44:55:66  -60      11  Y  US NONE\n",
-        );
-
-        let nets = parse_airport_output(input).unwrap();
-        assert_eq!(nets.len(), 2);
-
+    fn profiler_parses_secured_and_open() {
+        let nets = parse_system_profiler_output(mock_profiler_output()).unwrap();
+        assert_eq!(nets.len(), 3);
         let home = nets.iter().find(|n| n.ssid == "HomeNetwork").unwrap();
         assert_eq!(home.signal_strength, -45);
         assert!(home.secured);
-
+        assert_eq!(home.frequency_ghz, Some(5.0));
         let cafe = nets.iter().find(|n| n.ssid == "OpenCafe").unwrap();
         assert_eq!(cafe.signal_strength, -60);
         assert!(!cafe.secured);
+        assert_eq!(cafe.frequency_ghz, Some(2.4));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn airport_empty_output_returns_empty() {
-        let nets = parse_airport_output("").unwrap();
+    fn profiler_empty_returns_empty() {
+        let nets = parse_system_profiler_output("").unwrap();
         assert!(nets.is_empty());
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn airport_no_header_returns_empty() {
-        // Without the SSID+BSSID header the parser finds nothing
-        let nets = parse_airport_output("some random line\nanother line\n").unwrap();
-        assert!(nets.is_empty());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn airport_2_4_ghz_channel_frequency() {
-        let input = concat!(
-            "                            SSID BSSID             RSSI CHANNEL HT  CC SECURITY\n",
-            "                           Net24 aa:bb:cc:dd:ee:ff  -50       6  Y  US WPA2(PSK/AES/AES)\n",
-        );
-        let nets = parse_airport_output(input).unwrap();
-        assert!(!nets.is_empty(), "expected at least one network");
-        assert_eq!(nets[0].frequency_ghz, Some(2.4));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn airport_5_ghz_channel_frequency() {
-        let input = concat!(
-            "                            SSID BSSID             RSSI CHANNEL HT  CC SECURITY\n",
-            "                           Net5G aa:bb:cc:dd:ee:ff  -55      36  Y  US WPA2(PSK/AES/AES)\n",
-        );
-        let nets = parse_airport_output(input).unwrap();
-        assert!(!nets.is_empty(), "expected at least one network");
-        assert_eq!(nets[0].frequency_ghz, Some(5.0));
+    fn profiler_wpa3_is_secured() {
+        let nets = parse_system_profiler_output(mock_profiler_output()).unwrap();
+        let office = nets.iter().find(|n| n.ssid == "Office5G").unwrap();
+        assert!(office.secured);
+        assert_eq!(office.frequency_ghz, Some(5.0));
     }
 
     // ── Linux nmcli parsing ───────────────────────────────────────────────────
