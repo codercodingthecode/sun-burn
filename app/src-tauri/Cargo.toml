@@ -1,0 +1,26 @@
+[package]
+name = "sun-burn-app"
+version = "0.1.0"
+description = "sun-burn — a manifest-driven image flasher"
+authors = ["Andy"]
+license = "UNLICENSED"
+repository = ""
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "sun_burn_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt"] }
+flasher = { path = "../../crates/flasher" }
+image-patcher = { path = "../../crates/image-patcher" }
+device-enumerator = { path = "../../crates/device-enumerator" }
+wifi-scanner = { path = "../../crates/wifi-scanner" }
