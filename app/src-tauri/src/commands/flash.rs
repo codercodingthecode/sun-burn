@@ -5,8 +5,22 @@ pub async fn patch_image(
     image_path: String,
     values: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    let _ = (image_path, values);
-    todo!()
+    let mut patcher = image_patcher::ImagePatcher::open(&image_path)
+        .map_err(|e| e.to_string())?;
+
+    let manifest = patcher
+        .read_manifest()
+        .map_err(|e| e.to_string())?;
+
+    if let Some(manifest) = manifest {
+        for step in &manifest.steps {
+            patcher
+                .apply_writes(step, &values)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
