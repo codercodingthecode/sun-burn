@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>sun-burn — Flash any image. Configure everything.</title>
+  <meta name="description" content="sun-burn reads a manifest from the image's boot partition and shows a setup wizard before flashing — WiFi, hostname, SSH, timezone. No monitor required." />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <script>
+    window.SUNBURN_VERSION = '0.1.0';
+    window.SUNBURN_SHA = '8ed9e47';
+  </script>
+
+  <!-- NAV -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <span class="nav-logo">sun-burn</span>
+      <div class="nav-links">
+        <a href="https://github.com/codercodingthecode/sun-burn" class="nav-link" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/codercodingthecode/sun-burn/releases" class="btn btn-amber" target="_blank" rel="noopener">Download</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- HERO -->
+  <section class="hero">
+    <div class="container">
+      <div class="hero-badge">
+        <span id="version-badge">v0.1.0 (local)</span>
+      </div>
+      <h1 class="hero-headline">Flash any image.<br />Configure everything.</h1>
+      <p class="hero-sub">sun-burn reads a manifest from the image's boot partition and shows a setup wizard before flashing — WiFi, hostname, SSH, timezone. No monitor required.</p>
+      <div class="hero-actions">
+        <a href="https://github.com/codercodingthecode/sun-burn/releases" class="btn btn-amber btn-lg" target="_blank" rel="noopener">Download for macOS</a>
+        <a href="https://github.com/codercodingthecode/sun-burn" class="btn btn-outline btn-lg" target="_blank" rel="noopener">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- HOW IT WORKS -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-title">How it works</h2>
+      <div class="steps">
+        <div class="step-card">
+          <div class="step-number">1</div>
+          <h3 class="step-title">Pick an image</h3>
+          <p class="step-desc">Select any <code>.img</code> file. sun-burn checks for a <code>sunburn.json</code> on the boot partition.</p>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-card">
+          <div class="step-number">2</div>
+          <h3 class="step-title">Configure</h3>
+          <p class="step-desc">If a manifest is found, a guided wizard collects WiFi credentials, hostname, SSH keys — whatever the image author declared.</p>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-card">
+          <div class="step-number">3</div>
+          <h3 class="step-title">Flash</h3>
+          <p class="step-desc">sun-burn writes the config to the boot partition, then flashes the image to your SD card or USB drive with real-time progress.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- MANIFEST SHOWCASE -->
+  <section class="section section-dark">
+    <div class="container">
+      <h2 class="section-title">The <code class="title-code">sunburn.json</code> standard</h2>
+      <p class="section-sub">Any image author can ship a manifest. sun-burn renders the wizard from it.</p>
+      <div class="code-block">
+        <div class="code-header">
+          <span class="code-lang">sunburn.json</span>
+        </div>
+        <pre class="code-pre"><code><span class="j-brace">{</span>
+  <span class="j-key">"version"</span><span class="j-colon">:</span> <span class="j-string">"1"</span><span class="j-comma">,</span>
+  <span class="j-key">"name"</span><span class="j-colon">:</span> <span class="j-string">"My Device OS"</span><span class="j-comma">,</span>
+  <span class="j-key">"steps"</span><span class="j-colon">:</span> <span class="j-brace">[</span>
+    <span class="j-brace">{</span>
+      <span class="j-key">"id"</span><span class="j-colon">:</span> <span class="j-string">"network"</span><span class="j-comma">,</span>
+      <span class="j-key">"title"</span><span class="j-colon">:</span> <span class="j-string">"Network Setup"</span><span class="j-comma">,</span>
+      <span class="j-key">"fields"</span><span class="j-colon">:</span> <span class="j-brace">[</span>
+        <span class="j-brace">{</span> <span class="j-key">"id"</span><span class="j-colon">:</span> <span class="j-string">"ssid"</span><span class="j-comma">,</span> <span class="j-key">"type"</span><span class="j-colon">:</span> <span class="j-string">"wifi-picker"</span><span class="j-comma">,</span> <span class="j-key">"label"</span><span class="j-colon">:</span> <span class="j-string">"WiFi Network"</span><span class="j-comma">,</span> <span class="j-key">"required"</span><span class="j-colon">:</span> <span class="j-bool">true</span> <span class="j-brace">}</span><span class="j-comma">,</span>
+        <span class="j-brace">{</span> <span class="j-key">"id"</span><span class="j-colon">:</span> <span class="j-string">"password"</span><span class="j-comma">,</span> <span class="j-key">"type"</span><span class="j-colon">:</span> <span class="j-string">"password"</span><span class="j-comma">,</span> <span class="j-key">"label"</span><span class="j-colon">:</span> <span class="j-string">"Password"</span><span class="j-comma">,</span> <span class="j-key">"required"</span><span class="j-colon">:</span> <span class="j-bool">true</span> <span class="j-brace">}</span>
+      <span class="j-brace">]</span><span class="j-comma">,</span>
+      <span class="j-key">"writes"</span><span class="j-colon">:</span> <span class="j-brace">[</span>
+        <span class="j-brace">{</span> <span class="j-key">"path"</span><span class="j-colon">:</span> <span class="j-string">"wifi.txt"</span><span class="j-comma">,</span> <span class="j-key">"template"</span><span class="j-colon">:</span> <span class="j-string">"ssid={{ssid}}\npassword={{password}}"</span> <span class="j-brace">}</span>
+      <span class="j-brace">]</span>
+    <span class="j-brace">}</span>
+  <span class="j-brace">]</span>
+<span class="j-brace">}</span></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- FIELD TYPES TABLE -->
+  <section class="section">
+    <div class="container">
+      <h2 class="section-title">Field types</h2>
+      <p class="section-sub">All eight types supported in the current spec.</p>
+      <div class="table-wrap">
+        <table class="field-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><code>text</code></td>
+              <td>Plain single-line text input.</td>
+            </tr>
+            <tr>
+              <td><code>password</code></td>
+              <td>Masked text input.</td>
+            </tr>
+            <tr>
+              <td><code>wifi-picker</code></td>
+              <td>Native or scanned Wi-Fi SSID chooser.</td>
+            </tr>
+            <tr>
+              <td><code>ssh-key-picker</code></td>
+              <td>File-picker or paste for an SSH public key.</td>
+            </tr>
+            <tr>
+              <td><code>country-picker</code></td>
+              <td>Dropdown seeded from the ISO 3166-1 country list.</td>
+            </tr>
+            <tr>
+              <td><code>timezone-picker</code></td>
+              <td>Dropdown seeded from the IANA timezone database.</td>
+            </tr>
+            <tr>
+              <td><code>toggle</code></td>
+              <td>Boolean on/off switch; value is <code>"true"</code> or <code>"false"</code>.</td>
+            </tr>
+            <tr>
+              <td><code>select</code></td>
+              <td>Dropdown from a static list; requires an <code>options</code> array.</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <!-- SCREENSHOTS -->
+  <!-- SCREENSHOTS -->
+  <section class="section section-dark">
+    <div class="container">
+      <h2 class="section-title">Screenshots</h2>
+      <p class="section-sub">Click any image to expand.</p>
+      <div class="screenshots">
+        <div class="screenshot-wrap">
+          <img src="screenshots/select-image.png" alt="Select image screen" class="screenshot-img" />
+          <span class="screenshot-caption">Select Image</span>
+        </div>
+        <div class="screenshot-wrap">
+          <img src="screenshots/network-setup.png" alt="Network setup wizard" class="screenshot-img" />
+          <span class="screenshot-caption">Network Setup</span>
+        </div>
+        <div class="screenshot-wrap">
+          <img src="screenshots/device.png" alt="Device configuration" class="screenshot-img" />
+          <span class="screenshot-caption">Device Configuration</span>
+        </div>
+        <div class="screenshot-wrap">
+          <img src="screenshots/access.png" alt="Access and SSH" class="screenshot-img" />
+          <span class="screenshot-caption">Access &amp; SSH</span>
+        </div>
+        <div class="screenshot-wrap">
+          <img src="screenshots/confirm.png" alt="Confirm and flash" class="screenshot-img" />
+          <span class="screenshot-caption">Confirm &amp; Flash</span>
+        </div>
+        <div class="screenshot-wrap">
+          <img src="screenshots/flashing.png" alt="Flashing progress" class="screenshot-img" />
+          <span class="screenshot-caption">Flash Progress</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DOWNLOAD -->
+  <section class="section" id="download">
+    <div class="container">
+      <h2 class="section-title">Download sun-burn</h2>
+      <div class="platform-grid">
+        <a href="https://github.com/codercodingthecode/sun-burn/releases/latest" class="platform-card">
+          <div class="platform-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M12 6v6l4 2"/></svg>
+          </div>
+          <div class="platform-info">
+            <span class="platform-name">macOS</span>
+            <span class="platform-arch">Apple Silicon</span>
+          </div>
+          <span class="platform-dl">↓ .dmg</span>
+        </a>
+        <a href="https://github.com/codercodingthecode/sun-burn/releases/latest" class="platform-card">
+          <div class="platform-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M12 6v6l4 2"/></svg>
+          </div>
+          <div class="platform-info">
+            <span class="platform-name">macOS</span>
+            <span class="platform-arch">Intel</span>
+          </div>
+          <span class="platform-dl">↓ .dmg</span>
+        </a>
+        <a href="https://github.com/codercodingthecode/sun-burn/releases/latest" class="platform-card">
+          <div class="platform-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>
+          </div>
+          <div class="platform-info">
+            <span class="platform-name">Windows</span>
+            <span class="platform-arch">x64</span>
+          </div>
+          <span class="platform-dl">↓ .msi</span>
+        </a>
+        <a href="https://github.com/codercodingthecode/sun-burn/releases/latest" class="platform-card">
+          <div class="platform-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3v18M3 12h18"/></svg>
+          </div>
+          <div class="platform-info">
+            <span class="platform-name">Linux</span>
+            <span class="platform-arch">x64</span>
+          </div>
+          <span class="platform-dl">↓ .AppImage</span>
+        </a>
+      </div>
+      <p class="platform-note">Requires macOS 12+, Windows 10+, or Ubuntu 20.04+</p>
+    </div>
+  </section>
+
+  <!-- FOOTER -->
+  <footer class="footer">
+    <div class="container footer-inner">
+      <p class="footer-oss">sun-burn is open source — MIT License</p>
+      <nav class="footer-links">
+        <a href="https://github.com/codercodingthecode/sun-burn" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://github.com/codercodingthecode/sun-burn/blob/master/docs/sunburn-manifest-spec.md" target="_blank" rel="noopener">Manifest Spec</a>
+        <a href="https://github.com/codercodingthecode/sun-burn/releases" target="_blank" rel="noopener">Releases</a>
+      </nav>
+      <p class="footer-version"><span id="footer-version-badge"></span></p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
