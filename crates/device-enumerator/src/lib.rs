@@ -24,7 +24,6 @@ pub fn list_drives() -> Result<Vec<Drive>, EnumeratorError> {
 
 #[cfg(target_os = "macos")]
 fn list_drives_impl() -> Result<Vec<Drive>, EnumeratorError> {
-    use plist::Value;
     use std::process::Command;
 
     let output = Command::new("diskutil")
@@ -32,6 +31,13 @@ fn list_drives_impl() -> Result<Vec<Drive>, EnumeratorError> {
         .output()?;
 
     let plist_bytes = output.stdout.as_slice();
+    parse_diskutil_plist(plist_bytes)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn parse_diskutil_plist(plist_bytes: &[u8]) -> Result<Vec<Drive>, EnumeratorError> {
+    use plist::Value;
+
     let value = Value::from_reader(std::io::Cursor::new(plist_bytes))
         .map_err(|e| EnumeratorError::Parse(e.to_string()))?;
 
@@ -97,7 +103,12 @@ fn list_drives_impl() -> Result<Vec<Drive>, EnumeratorError> {
         .args(["-J", "-b", "-o", "NAME,SIZE,RM,MODEL,TYPE"])
         .output()?;
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+    parse_lsblk_json(&output.stdout)
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_lsblk_json(data: &[u8]) -> Result<Vec<Drive>, EnumeratorError> {
+    let json: serde_json::Value = serde_json::from_slice(data)
         .map_err(|e| EnumeratorError::Parse(e.to_string()))?;
 
     let blockdevices = json["blockdevices"]
@@ -173,6 +184,11 @@ fn list_drives_impl() -> Result<Vec<Drive>, EnumeratorError> {
         .output()?;
 
     let text = String::from_utf8_lossy(&output.stdout);
+    parse_wmic_csv(&text)
+}
+
+#[allow(dead_code)]
+pub(crate) fn parse_wmic_csv(text: &str) -> Result<Vec<Drive>, EnumeratorError> {
     let mut drives = Vec::new();
 
     // CSV format: Node,DeviceID,Model,Size  (header + blank line + rows)
@@ -233,4 +249,195 @@ fn list_drives_impl() -> Result<Vec<Drive>, EnumeratorError> {
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn list_drives_impl() -> Result<Vec<Drive>, EnumeratorError> {
     Ok(Vec::new())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── macOS plist parsing ───────────────────────────────────────────────────
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_plist_single_disk_parsed() {
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>AllDisksAndPartitions</key>
+    <array>
+        <dict>
+            <key>DeviceIdentifier</key>
+            <string>disk4</string>
+            <key>Size</key>
+            <integer>32010928128</integer>
+            <key>MediaName</key>
+            <string>SanDisk Ultra</string>
+        </dict>
+    </array>
+</dict>
+</plist>"#;
+
+        let drives = parse_diskutil_plist(plist.as_bytes()).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].path, "/dev/disk4");
+        assert_eq!(drives[0].size_bytes, 32010928128);
+        assert!(drives[0].display_name.contains("SanDisk Ultra"));
+        assert!(drives[0].display_name.contains("32"));
+        assert!(drives[0].removable);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_plist_no_media_name_uses_device_id() {
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>AllDisksAndPartitions</key>
+    <array>
+        <dict>
+            <key>DeviceIdentifier</key>
+            <string>disk5</string>
+            <key>Size</key>
+            <integer>16000000000</integer>
+        </dict>
+    </array>
+</dict>
+</plist>"#;
+
+        let drives = parse_diskutil_plist(plist.as_bytes()).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert!(drives[0].display_name.contains("disk5"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_plist_empty_array_returns_empty() {
+        let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>AllDisksAndPartitions</key>
+    <array/>
+</dict>
+</plist>"#;
+        let drives = parse_diskutil_plist(plist.as_bytes()).unwrap();
+        assert!(drives.is_empty());
+    }
+
+    // ── Linux lsblk JSON parsing ──────────────────────────────────────────────
+
+    #[test]
+    fn linux_lsblk_removable_disk_parsed() {
+        let json = r#"{"blockdevices":[
+            {"name":"sdb","size":32010928128,"rm":true,"model":"SanDisk Ultra","type":"disk"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].path, "/dev/sdb");
+        assert_eq!(drives[0].size_bytes, 32010928128);
+        assert!(drives[0].display_name.contains("SanDisk Ultra"));
+        assert!(drives[0].removable);
+    }
+
+    #[test]
+    fn linux_lsblk_non_removable_disk_excluded() {
+        let json = r#"{"blockdevices":[
+            {"name":"sda","size":500000000000,"rm":false,"model":"WD Black","type":"disk"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert!(drives.is_empty());
+    }
+
+    #[test]
+    fn linux_lsblk_partition_type_excluded() {
+        let json = r#"{"blockdevices":[
+            {"name":"sdb1","size":32010928128,"rm":true,"model":"","type":"part"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert!(drives.is_empty());
+    }
+
+    #[test]
+    fn linux_lsblk_rm_as_string_one_is_removable() {
+        let json = r#"{"blockdevices":[
+            {"name":"sdc","size":8000000000,"rm":"1","model":"USB Drive","type":"disk"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].path, "/dev/sdc");
+    }
+
+    #[test]
+    fn linux_lsblk_rm_as_number_one_is_removable() {
+        let json = r#"{"blockdevices":[
+            {"name":"sdd","size":4000000000,"rm":1,"model":"Card Reader","type":"disk"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert_eq!(drives.len(), 1);
+    }
+
+    #[test]
+    fn linux_lsblk_size_as_string_parsed() {
+        let json = r#"{"blockdevices":[
+            {"name":"sde","size":"16000000000","rm":true,"model":"Mini USB","type":"disk"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert_eq!(drives[0].size_bytes, 16000000000);
+    }
+
+    #[test]
+    fn linux_lsblk_empty_model_uses_name() {
+        let json = r#"{"blockdevices":[
+            {"name":"sdf","size":8000000000,"rm":true,"model":"","type":"disk"}
+        ]}"#;
+        let drives = parse_lsblk_json(json.as_bytes()).unwrap();
+        assert!(drives[0].display_name.starts_with("sdf"));
+    }
+
+    #[test]
+    fn linux_lsblk_invalid_json_returns_error() {
+        let err = parse_lsblk_json(b"not json").unwrap_err();
+        assert!(matches!(err, EnumeratorError::Parse(_)));
+    }
+
+    // ── Windows wmic CSV parsing ──────────────────────────────────────────────
+
+    #[test]
+    fn windows_wmic_csv_parsed() {
+        let csv = "Node,DeviceID,Model,Size\nMACHINE,\\\\.\\PHYSICALDRIVE1,SanDisk Ultra USB,32010928128\n";
+        let drives = parse_wmic_csv(csv).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].path, r"\\.\PHYSICALDRIVE1");
+        assert_eq!(drives[0].size_bytes, 32010928128);
+        assert!(drives[0].display_name.contains("SanDisk Ultra USB"));
+        assert!(drives[0].removable);
+    }
+
+    #[test]
+    fn windows_wmic_csv_blank_line_before_data() {
+        // wmic output has a blank line between header and data
+        let csv = "Node,DeviceID,Model,Size\n\nMACHINE,\\\\.\\PHYSICALDRIVE2,Kingston USB,16000000000\n";
+        let drives = parse_wmic_csv(csv).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].size_bytes, 16000000000);
+    }
+
+    #[test]
+    fn windows_wmic_csv_empty_model_uses_device_id() {
+        let csv = "Node,DeviceID,Model,Size\nMACHINE,\\\\.\\PHYSICALDRIVE3,,8000000000\n";
+        let drives = parse_wmic_csv(csv).unwrap();
+        assert_eq!(drives.len(), 1);
+        assert!(drives[0].display_name.contains("PHYSICALDRIVE3"));
+    }
+
+    #[test]
+    fn windows_wmic_csv_only_header_returns_empty() {
+        let csv = "Node,DeviceID,Model,Size\n";
+        let drives = parse_wmic_csv(csv).unwrap();
+        assert!(drives.is_empty());
+    }
 }

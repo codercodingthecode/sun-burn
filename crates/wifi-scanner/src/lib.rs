@@ -23,7 +23,7 @@ pub fn scan_networks() -> Result<Vec<WifiNetwork>, WifiError> {
 }
 
 /// Keep the entry with the strongest signal for each SSID.
-fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
+pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
     use std::collections::HashMap;
 
     let mut best: HashMap<String, WifiNetwork> = HashMap::new();
@@ -55,7 +55,7 @@ fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
 }
 
 #[cfg(target_os = "macos")]
-fn parse_airport_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
+pub(crate) fn parse_airport_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
     // airport -s output looks like:
     //                             SSID BSSID             RSSI CHANNEL HT CC SECURITY (auth/unicast/group)
     //                         MyNet01 aa:bb:cc:dd:ee:ff  -65  6       Y  US WPA2(PSK/AES/AES)
@@ -163,6 +163,11 @@ fn try_nmcli() -> Result<Vec<WifiNetwork>, WifiError> {
     }
 
     let text = String::from_utf8_lossy(&output.stdout);
+    parse_nmcli_output(&text)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn parse_nmcli_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
     let mut networks = Vec::new();
 
     for line in text.lines() {
@@ -282,7 +287,7 @@ fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
 }
 
 #[cfg(target_os = "windows")]
-fn parse_netsh_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
+pub(crate) fn parse_netsh_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
     // netsh output groups networks with blank-line separated blocks like:
     //
     // SSID 1 : MyNetwork
@@ -349,4 +354,194 @@ fn parse_netsh_output(text: &str) -> Result<Vec<WifiNetwork>, WifiError> {
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
     Ok(Vec::new())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── macOS airport parsing ─────────────────────────────────────────────────
+    //
+    // Column offsets derived from the actual airport -s header:
+    //   bssid_col=33  rssi_col=51  security_col=71
+    //
+    // Each data line must have content aligned to those columns.
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn airport_parses_secured_and_open() {
+        // Header line (verbatim airport -s format), followed by two data lines
+        // constructed to align with bssid_col=33, rssi_col=51, security_col=71.
+        let input = concat!(
+            "                            SSID BSSID             RSSI CHANNEL HT  CC SECURITY (auth/unicast/group)\n",
+            "                     HomeNetwork aa:bb:cc:dd:ee:ff  -45       6  Y  US WPA2(PSK/AES/AES)\n",
+            "                        OpenCafe 11:22:33:44:55:66  -60      11  Y  US NONE\n",
+        );
+
+        let nets = parse_airport_output(input).unwrap();
+        assert_eq!(nets.len(), 2);
+
+        let home = nets.iter().find(|n| n.ssid == "HomeNetwork").unwrap();
+        assert_eq!(home.signal_strength, -45);
+        assert!(home.secured);
+
+        let cafe = nets.iter().find(|n| n.ssid == "OpenCafe").unwrap();
+        assert_eq!(cafe.signal_strength, -60);
+        assert!(!cafe.secured);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn airport_empty_output_returns_empty() {
+        let nets = parse_airport_output("").unwrap();
+        assert!(nets.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn airport_no_header_returns_empty() {
+        // Without the SSID+BSSID header the parser finds nothing
+        let nets = parse_airport_output("some random line\nanother line\n").unwrap();
+        assert!(nets.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn airport_2_4_ghz_channel_frequency() {
+        let input = concat!(
+            "                            SSID BSSID             RSSI CHANNEL HT  CC SECURITY\n",
+            "                           Net24 aa:bb:cc:dd:ee:ff  -50       6  Y  US WPA2(PSK/AES/AES)\n",
+        );
+        let nets = parse_airport_output(input).unwrap();
+        assert!(!nets.is_empty(), "expected at least one network");
+        assert_eq!(nets[0].frequency_ghz, Some(2.4));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn airport_5_ghz_channel_frequency() {
+        let input = concat!(
+            "                            SSID BSSID             RSSI CHANNEL HT  CC SECURITY\n",
+            "                           Net5G aa:bb:cc:dd:ee:ff  -55      36  Y  US WPA2(PSK/AES/AES)\n",
+        );
+        let nets = parse_airport_output(input).unwrap();
+        assert!(!nets.is_empty(), "expected at least one network");
+        assert_eq!(nets[0].frequency_ghz, Some(5.0));
+    }
+
+    // ── Linux nmcli parsing ───────────────────────────────────────────────────
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nmcli_parses_secured_and_open() {
+        let input = "HomeNetwork:85:WPA2\nOpenCafe:60:--\n";
+        let nets = parse_nmcli_output(input).unwrap();
+        assert_eq!(nets.len(), 2);
+
+        let home = nets.iter().find(|n| n.ssid == "HomeNetwork").unwrap();
+        // signal 85 → 85/2 - 100 = -58
+        assert_eq!(home.signal_strength, 85 / 2 - 100);
+        assert!(home.secured);
+
+        let cafe = nets.iter().find(|n| n.ssid == "OpenCafe").unwrap();
+        assert!(!cafe.secured);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nmcli_empty_ssid_skipped() {
+        let input = ":50:WPA2\nRealNet:70:WPA2\n";
+        let nets = parse_nmcli_output(input).unwrap();
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].ssid, "RealNet");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nmcli_ssid_with_colon_unescaped() {
+        // nmcli escapes ':' in SSIDs as '\:'
+        let input = "My\\:Net:80:WPA2\n";
+        let nets = parse_nmcli_output(input).unwrap();
+        assert_eq!(nets[0].ssid, "My:Net");
+    }
+
+    // ── Windows netsh parsing ─────────────────────────────────────────────────
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn netsh_parses_secured_and_open() {
+        let input = "\
+SSID 1                 : HomeNetwork\r\n\
+Authentication         : WPA2-Personal\r\n\
+Signal                 : 85%\r\n\
+\r\n\
+SSID 2                 : OpenCafe\r\n\
+Authentication         : Open\r\n\
+Signal                 : 60%\r\n";
+
+        let nets = parse_netsh_output(input).unwrap();
+        assert_eq!(nets.len(), 2);
+
+        let home = nets.iter().find(|n| n.ssid == "HomeNetwork").unwrap();
+        // 85% → 85/2-100 = -58
+        assert_eq!(home.signal_strength, 85 / 2 - 100);
+        assert!(home.secured);
+
+        let cafe = nets.iter().find(|n| n.ssid == "OpenCafe").unwrap();
+        assert!(!cafe.secured);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn netsh_empty_input_returns_empty() {
+        let nets = parse_netsh_output("").unwrap();
+        assert!(nets.is_empty());
+    }
+
+    // ── dedup_by_ssid ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn dedup_keeps_stronger_signal() {
+        let mut nets = vec![
+            WifiNetwork { ssid: "Home".into(), signal_strength: -70, secured: true,  frequency_ghz: None },
+            WifiNetwork { ssid: "Home".into(), signal_strength: -45, secured: true,  frequency_ghz: None },
+            WifiNetwork { ssid: "Home".into(), signal_strength: -60, secured: false, frequency_ghz: None },
+        ];
+        dedup_by_ssid(&mut nets);
+        assert_eq!(nets.len(), 1);
+        assert_eq!(nets[0].ssid, "Home");
+        assert_eq!(nets[0].signal_strength, -45);
+    }
+
+    #[test]
+    fn dedup_preserves_distinct_ssids() {
+        let mut nets = vec![
+            WifiNetwork { ssid: "Net1".into(), signal_strength: -50, secured: true,  frequency_ghz: None },
+            WifiNetwork { ssid: "Net2".into(), signal_strength: -60, secured: false, frequency_ghz: None },
+        ];
+        dedup_by_ssid(&mut nets);
+        assert_eq!(nets.len(), 2);
+    }
+
+    #[test]
+    fn dedup_sorts_by_signal_descending() {
+        let mut nets = vec![
+            WifiNetwork { ssid: "Weak".into(),   signal_strength: -80, secured: false, frequency_ghz: None },
+            WifiNetwork { ssid: "Strong".into(), signal_strength: -30, secured: true,  frequency_ghz: None },
+            WifiNetwork { ssid: "Mid".into(),    signal_strength: -55, secured: true,  frequency_ghz: None },
+        ];
+        dedup_by_ssid(&mut nets);
+        assert_eq!(nets[0].ssid, "Strong");
+        assert_eq!(nets[1].ssid, "Mid");
+        assert_eq!(nets[2].ssid, "Weak");
+    }
+
+    #[test]
+    fn dedup_empty_input_stays_empty() {
+        let mut nets: Vec<WifiNetwork> = Vec::new();
+        dedup_by_ssid(&mut nets);
+        assert!(nets.is_empty());
+    }
 }

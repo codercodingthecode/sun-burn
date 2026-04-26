@@ -111,7 +111,7 @@ impl Seek for OffsetFile {
 
 // ── Template substitution ─────────────────────────────────────────────────────
 
-fn substitute(template: &str, values: &HashMap<String, String>) -> String {
+pub(crate) fn substitute(template: &str, values: &HashMap<String, String>) -> String {
     let mut result = template.to_string();
     for (key, value) in values {
         result = result.replace(&format!("{{{{{}}}}}", key), value);
@@ -216,6 +216,8 @@ impl ImagePatcher {
 mod tests {
     use super::*;
 
+    // ── substitute ────────────────────────────────────────────────────────────
+
     #[test]
     fn substitute_replaces_placeholders() {
         let mut values = HashMap::new();
@@ -230,5 +232,213 @@ mod tests {
         let values = HashMap::new();
         let result = substitute("key={{unknown}}", &values);
         assert_eq!(result, "key={{unknown}}");
+    }
+
+    #[test]
+    fn substitute_multiple_occurrences() {
+        let mut values = HashMap::new();
+        values.insert("name".into(), "world".into());
+        let result = substitute("hello {{name}}, hello {{name}}!", &values);
+        assert_eq!(result, "hello world, hello world!");
+    }
+
+    // ── FAT image helpers ─────────────────────────────────────────────────────
+
+    /// Build a minimal raw disk image in a tempfile:
+    ///   - 1 MiB total
+    ///   - MBR pointing partition 1 at LBA 1 (byte offset 512)
+    ///   - FAT12 filesystem filling the rest
+    fn build_test_image() -> tempfile::NamedTempFile {
+        use std::io::{Seek, SeekFrom, Write};
+
+        const IMG_SIZE: usize = 1024 * 1024; // 1 MiB
+        const SECTOR: usize = 512;
+        const PART_LBA: u32 = 1; // partition starts at sector 1
+
+        // 1. Create temp file and zero-fill
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let zeros = vec![0u8; IMG_SIZE];
+        tmp.write_all(&zeros).unwrap();
+
+        // 2. Write MBR partition entry at offset 446 + 8 (LBA start field)
+        //    Entry layout (16 bytes total, offsets relative to entry start):
+        //      0:  status (0x80 = bootable)
+        //      1-3: CHS start (ignore for LBA mode)
+        //      4:  partition type (0x0B = FAT32 CHS, good enough for fatfs)
+        //      5-7: CHS end (ignore)
+        //      8-11: LBA start (little-endian u32)
+        //      12-15: sector count (little-endian u32)
+        let part_sectors = ((IMG_SIZE / SECTOR) - PART_LBA as usize) as u32;
+        let mut entry = [0u8; 16];
+        entry[0] = 0x80; // bootable
+        entry[4] = 0x0B; // FAT32 CHS
+        entry[8..12].copy_from_slice(&PART_LBA.to_le_bytes());
+        entry[12..16].copy_from_slice(&part_sectors.to_le_bytes());
+
+        tmp.seek(SeekFrom::Start(446)).unwrap();
+        tmp.write_all(&entry).unwrap();
+
+        // 3. Format the partition region as FAT using fatfs
+        //    We open the temp file again via OffsetFile and call FileSystem::new
+        //    with format=true (FsOptions::new() formats when the BPB is absent/zeroed).
+        tmp.seek(SeekFrom::Start(0)).unwrap();
+        let raw = tmp.reopen().expect("reopen");
+
+        let offset_file = OffsetFile::new(raw, PART_LBA as u64 * SECTOR as u64);
+        fatfs::format_volume(
+            offset_file,
+            fatfs::FormatVolumeOptions::new().volume_label(*b"SUNBURN    "),
+        )
+        .expect("format_volume");
+
+        tmp
+    }
+
+    /// Open an `ImagePatcher` against the given temp-file path.
+    fn open_patcher(tmp: &tempfile::NamedTempFile) -> ImagePatcher {
+        ImagePatcher::open(tmp.path()).expect("ImagePatcher::open")
+    }
+
+    // ── read_file / write_file ────────────────────────────────────────────────
+
+    #[test]
+    fn write_then_read_file() {
+        let tmp = build_test_image();
+        let mut patcher = open_patcher(&tmp);
+
+        patcher.write_file("hello.txt", b"hello world").unwrap();
+
+        let data = patcher.read_file("hello.txt").unwrap();
+        assert_eq!(data, b"hello world");
+    }
+
+    #[test]
+    fn read_file_missing_returns_error() {
+        let tmp = build_test_image();
+        let patcher = open_patcher(&tmp);
+        let err = patcher.read_file("no_such_file.txt").unwrap_err();
+        // Should be a Fat error
+        assert!(matches!(err, PatcherError::Fat(_)));
+    }
+
+    #[test]
+    fn write_file_overwrites_existing() {
+        let tmp = build_test_image();
+        let mut patcher = open_patcher(&tmp);
+
+        patcher.write_file("data.txt", b"first").unwrap();
+        patcher.write_file("data.txt", b"second").unwrap();
+
+        let data = patcher.read_file("data.txt").unwrap();
+        assert_eq!(data, b"second");
+    }
+
+    // ── read_manifest ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_manifest_returns_none_when_absent() {
+        let tmp = build_test_image();
+        let patcher = open_patcher(&tmp);
+        let result = patcher.read_manifest().unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_manifest_returns_some_when_present() {
+        let tmp = build_test_image();
+        let mut patcher = open_patcher(&tmp);
+
+        let manifest_json = r#"{
+            "version": "1",
+            "name": "Test Image",
+            "steps": [{
+                "id": "net",
+                "title": "Network",
+                "fields": [],
+                "writes": []
+            }]
+        }"#;
+        patcher.write_file("sunburn.json", manifest_json.as_bytes()).unwrap();
+
+        let m = patcher.read_manifest().unwrap().expect("should be Some");
+        assert_eq!(m.name, "Test Image");
+    }
+
+    // ── apply_writes ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn apply_writes_substitutes_and_writes() {
+        let tmp = build_test_image();
+        let mut patcher = open_patcher(&tmp);
+
+        let step = manifest::Step {
+            id: "net".into(),
+            title: "Network".into(),
+            fields: vec![],
+            writes: vec![manifest::WriteRule {
+                path: "wpa.conf".into(),
+                template: "network={\n  ssid=\"{{ssid}}\"\n  psk=\"{{psk}}\"\n}".into(),
+            }],
+        };
+
+        let mut values = HashMap::new();
+        values.insert("ssid".into(), "MySSID".into());
+        values.insert("psk".into(), "MyPass".into());
+
+        patcher.apply_writes(&step, &values).unwrap();
+
+        let data = patcher.read_file("wpa.conf").unwrap();
+        let text = String::from_utf8(data).unwrap();
+        assert!(text.contains("ssid=\"MySSID\""));
+        assert!(text.contains("psk=\"MyPass\""));
+    }
+
+    #[test]
+    fn apply_writes_multiple_rules() {
+        let tmp = build_test_image();
+        let mut patcher = open_patcher(&tmp);
+
+        let step = manifest::Step {
+            id: "s".into(),
+            title: "S".into(),
+            fields: vec![],
+            writes: vec![
+                manifest::WriteRule { path: "a.txt".into(), template: "A={{val}}".into() },
+                manifest::WriteRule { path: "b.txt".into(), template: "B={{val}}".into() },
+            ],
+        };
+
+        let mut values = HashMap::new();
+        values.insert("val".into(), "42".into());
+
+        patcher.apply_writes(&step, &values).unwrap();
+
+        assert_eq!(patcher.read_file("a.txt").unwrap(), b"A=42");
+        assert_eq!(patcher.read_file("b.txt").unwrap(), b"B=42");
+    }
+
+    // ── OffsetFile ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn offset_file_seek_start_and_current() {
+        use std::io::{Read, Seek, SeekFrom, Write};
+
+        let tmp_file = tempfile::tempfile().unwrap();
+        let mut of = OffsetFile::new(tmp_file, 0);
+
+        // Write some bytes
+        of.write_all(b"ABCDE").unwrap();
+
+        // Seek back to start and read
+        of.seek(SeekFrom::Start(0)).unwrap();
+        let mut buf = [0u8; 5];
+        of.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ABCDE");
+
+        // SeekFrom::Current moves relative to current pos (now 5)
+        of.seek(SeekFrom::Current(-3)).unwrap();
+        let mut buf2 = [0u8; 1];
+        of.read_exact(&mut buf2).unwrap();
+        assert_eq!(&buf2, b"C");
     }
 }
