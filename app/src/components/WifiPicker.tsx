@@ -25,6 +25,19 @@ function SignalIcon(props: { bars: number; secured: boolean }) {
   )
 }
 
+async function requestLocationThenScan(): Promise<WifiNetwork[]> {
+  // Request Location permission via browser Geolocation API.
+  // macOS requires this for apps to read WiFi SSIDs via system_profiler.
+  await new Promise<void>((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      () => resolve(),
+      () => resolve(), // proceed even if denied — scan will return what it can
+      { timeout: 3000 }
+    )
+  })
+  return invoke<WifiNetwork[]>('scan_wifi_networks')
+}
+
 const WifiPicker: Component<Props> = (props) => {
   const [networks, setNetworks] = createSignal<WifiNetwork[]>([])
   const [scanning, setScanning] = createSignal(true)
@@ -33,10 +46,8 @@ const WifiPicker: Component<Props> = (props) => {
   createEffect(async () => {
     setScanning(true)
     try {
-      const result = await invoke<WifiNetwork[]>('scan_wifi_networks')
-      // Filter out blank or redacted SSIDs (macOS returns these without Location permission)
-      const valid = result.filter(n => n.ssid && n.ssid !== '<redacted>' && n.ssid.trim() !== '')
-      setNetworks(valid)
+      const result = await requestLocationThenScan()
+      setNetworks(result.filter(n => n.ssid && n.ssid !== '<redacted>'))
     } catch (err) {
       console.error('WiFi scan failed:', err)
     } finally {
@@ -44,51 +55,48 @@ const WifiPicker: Component<Props> = (props) => {
     }
   })
 
-  const visibleNetworks = () => networks()
-  const hasNetworks = () => visibleNetworks().length > 0
+  const selected = () => networks().find((n) => n.ssid === props.value)
 
   return (
     <div class="wifi-picker">
-      {/* Always-visible text input */}
-      <input
-        type="text"
-        class="wifi-text-input"
-        placeholder="Enter network name…"
-        value={props.value}
-        onInput={(e) => props.onChange(e.currentTarget.value)}
-      />
-
-      {/* Scan dropdown — shown when we have real results */}
-      <Show when={!scanning() && hasNetworks()}>
-        <button
-          type="button"
-          class="wifi-scan-toggle"
-          onClick={() => setOpen((o) => !o)}
-        >
-          {open() ? '▲ Hide nearby networks' : `▼ Nearby networks (${visibleNetworks().length})`}
-        </button>
-
-        <Show when={open()}>
-          <div class="wifi-dropdown">
-            <For each={visibleNetworks()}>
-              {(net) => (
-                <button
-                  type="button"
-                  class={`wifi-option ${net.ssid === props.value ? 'wifi-option--selected' : ''}`}
-                  onClick={() => { props.onChange(net.ssid); setOpen(false) }}
-                >
-                  <SignalIcon bars={signalBars(net.signal_strength)} secured={net.secured} />
-                  <span class="wifi-ssid">{net.ssid}</span>
-                  <span class="wifi-meta">{net.signal_strength} dBm{net.frequency_ghz ? ` · ${net.frequency_ghz} GHz` : ''}</span>
-                </button>
-              )}
-            </For>
-          </div>
+      <button
+        type="button"
+        class="wifi-trigger"
+        onClick={() => setOpen((o) => !o)}
+        disabled={scanning()}
+      >
+        <Show when={scanning()} fallback={
+          <Show when={selected()} fallback={<span class="placeholder">Select network…</span>}>
+            {(net) => (
+              <>
+                <SignalIcon bars={signalBars(net().signal_strength)} secured={net().secured} />
+                <span>{net().ssid}</span>
+              </>
+            )}
+          </Show>
+        }>
+          <span class="spinner" />
+          <span>Scanning…</span>
         </Show>
-      </Show>
+        <span class="chevron">{open() ? '▲' : '▼'}</span>
+      </button>
 
-      <Show when={scanning()}>
-        <span class="wifi-scanning-hint"><span class="spinner" /> Scanning for networks…</span>
+      <Show when={open() && !scanning()}>
+        <div class="wifi-dropdown">
+          <For each={networks()} fallback={<div class="wifi-empty">No networks found</div>}>
+            {(net) => (
+              <button
+                type="button"
+                class={`wifi-option ${net.ssid === props.value ? 'wifi-option--selected' : ''}`}
+                onClick={() => { props.onChange(net.ssid); setOpen(false) }}
+              >
+                <SignalIcon bars={signalBars(net.signal_strength)} secured={net.secured} />
+                <span class="wifi-ssid">{net.ssid}</span>
+                <span class="wifi-meta">{net.signal_strength} dBm{net.frequency_ghz ? ` · ${net.frequency_ghz} GHz` : ''}</span>
+              </button>
+            )}
+          </For>
+        </div>
       </Show>
     </div>
   )
