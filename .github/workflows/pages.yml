@@ -1,0 +1,29 @@
+name: Deploy Pages
+on:
+  push:
+    branches: [master]
+permissions:
+  contents: write
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get version and SHA
+        id: info
+        run: |
+          VERSION=$(cat app/src-tauri/tauri.conf.json | python3 -c "import sys,json; print(json.load(sys.stdin)['version'])")
+          SHA=$(git rev-parse --short HEAD)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+      - name: Inject version into site
+        run: |
+          sed -i "s/{{VERSION}}/${{ steps.info.outputs.version }}/g" docs/site/index.html
+          sed -i "s/{{SHA}}/${{ steps.info.outputs.sha }}/g" docs/site/index.html
+      - name: Deploy to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs/site
+          publish_branch: gh-pages
+          force_orphan: true
