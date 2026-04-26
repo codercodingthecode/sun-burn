@@ -41,12 +41,15 @@ pub(crate) fn dedup_by_ssid(networks: &mut Vec<WifiNetwork>) {
 // ── macOS ─────────────────────────────────────────────────────────────────────
 //
 // macOS 15+ requires Location permission for CoreWLAN to disclose real SSIDs.
-// The frontend triggers the permission dialog via navigator.geolocation
-// (granted to the bundle ID, which propagates to the Rust backend).
-// Once granted, wifi_scan (CoreWLAN) returns real nearby networks with RSSI.
+// We request Location authorization via CLLocationManager from this (the main
+// app) process — the dialog appears for the .app bundle ID since Info.plist
+// has NSLocationWhenInUseUsageDescription. Then we use wifi_scan (CoreWLAN)
+// to scan real nearby networks.
 
 #[cfg(target_os = "macos")]
 fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
+    request_location_authorization();
+
     let results = wifi_scan::scan().map_err(|e| WifiError::Parse(e.to_string()))?;
     let networks = results
         .into_iter()
@@ -60,6 +63,38 @@ fn scan_networks_impl() -> Result<Vec<WifiNetwork>, WifiError> {
         })
         .collect();
     Ok(networks)
+}
+
+#[cfg(target_os = "macos")]
+fn request_location_authorization() {
+    use objc2::rc::Retained;
+    use objc2_core_location::{CLAuthorizationStatus, CLLocationManager};
+    use objc2_foundation::{NSDate, NSRunLoop};
+    use std::time::{Duration, Instant};
+
+    unsafe {
+        let manager: Retained<CLLocationManager> = CLLocationManager::new();
+
+        let status = manager.authorizationStatus();
+        if status != CLAuthorizationStatus(0) {
+            // 0 = notDetermined; non-zero means already decided
+            return;
+        }
+
+        manager.requestWhenInUseAuthorization();
+
+        // Pump the run loop until the status changes or we time out.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let run_loop = NSRunLoop::currentRunLoop();
+        while Instant::now() < deadline {
+            let next: Retained<NSDate> = NSDate::dateWithTimeIntervalSinceNow(0.1);
+            run_loop.runUntilDate(&next);
+            let s = manager.authorizationStatus();
+            if s != CLAuthorizationStatus(0) {
+                break;
+            }
+        }
+    }
 }
 
 /// Parses the WiFi interface name from `networksetup -listallhardwareports`.
