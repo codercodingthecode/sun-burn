@@ -66,18 +66,8 @@ const Flashing: Component = () => {
       addLog(`Staging image and unmounting ${state.selectedDrive?.path}…`)
       addLog('Requesting admin password to write to disk…')
 
-      let lastLoggedPct = -1
       const unlisten = await listen<FlashProgress>('flash-progress', (event) => {
         setState('flashProgress', event.payload)
-        const p = event.payload
-        if (p.total_bytes > 0) {
-          const pct = Math.floor((p.bytes_written / p.total_bytes) * 100)
-          // Log every 5% to keep the log readable
-          if (pct >= lastLoggedPct + 5 || pct === 100) {
-            lastLoggedPct = pct
-            addLog(`${pct}% — ${formatBytes(p.bytes_written)} / ${formatBytes(p.total_bytes)} @ ${formatSpeed(p.speed_bps)}`)
-          }
-        }
       })
 
       try {
