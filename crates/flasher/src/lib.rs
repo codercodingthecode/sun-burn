@@ -131,9 +131,9 @@ impl Flasher {
             FlashError::Io(std::io::Error::new(std::io::ErrorKind::Other, "no stdin"))
         })?;
 
-        // Open source and stream to authopen's stdin in 4MB chunks
+        // Open source and stream to authopen's stdin in 16MB chunks
         let mut src_file = std::fs::File::open(&self.source_path).map_err(FlashError::Io)?;
-        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let mut buf = vec![0u8; 16 * 1024 * 1024];
         let mut bytes_written: u64 = 0;
         let mut last_emit = Instant::now();
         let mut bytes_since_last: u64 = 0;
