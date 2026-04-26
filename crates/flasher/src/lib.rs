@@ -103,48 +103,59 @@ impl Flasher {
     where
         F: Fn(FlashProgress) + Send + Sync + 'static,
     {
-        use std::io::{BufRead, BufReader};
-        use std::process::Stdio;
-        use std::sync::Arc;
+        use std::io::Write;
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+        use std::time::{Duration, Instant};
 
-        // Unmount the disk before writing
         let disk = &self.dest_path;
+        let raw_dest = to_raw_device(disk);
+        let src = self.source_path.display().to_string();
+
+        // Unmount the volumes on the disk before writing (no admin needed)
         let _ = std::process::Command::new("diskutil")
             .args(["unmountDisk", disk])
             .output();
 
-        let raw_dest = to_raw_device(disk);
-        let src = self.source_path.display().to_string();
+        // Write the dd shell script to a temp file. Embedding paths in the
+        // shell script avoids the AppleScript escaping nightmare. We also
+        // write progress to a separate file (/tmp/sunburn-progress-PID) that
+        // a polling thread reads.
+        let pid = std::process::id();
+        let script_path = format!("/tmp/sunburn-flash-{}.sh", pid);
+        let progress_path = format!("/tmp/sunburn-progress-{}", pid);
+        let _ = std::fs::remove_file(&progress_path);
 
-        // Use osascript to elevate `dd` with admin privileges. Pipe stderr to
-        // capture dd's status output (one line per progress sample).
-        // We use bs=4m and status=progress (or fallback to SIGINFO).
-        // Spawn a long-running shell where we can SIGINFO the dd PID periodically
-        // to print progress to stderr, which we parse.
         let script = format!(
-            r#"sh -c 'dd if="{src}" of="{raw_dest}" bs=4m & DD_PID=$!; \
-while kill -0 $DD_PID 2>/dev/null; do \
-sleep 1; \
-kill -INFO $DD_PID 2>/dev/null; \
-done; \
-wait $DD_PID'"#,
-            src = src.replace('"', r#"\""#),
+            r#"#!/bin/sh
+set -e
+PROGRESS_FILE="{progress_path}"
+dd if="{src}" of="{raw_dest}" bs=4m 2>>"$PROGRESS_FILE" &
+DD_PID=$!
+while kill -0 $DD_PID 2>/dev/null; do
+  sleep 1
+  kill -INFO $DD_PID 2>/dev/null || true
+done
+wait $DD_PID
+DD_EXIT=$?
+exit $DD_EXIT
+"#,
+            progress_path = progress_path,
+            src = src,
             raw_dest = raw_dest,
         );
 
-        let osascript_arg = format!(
-            r#"do shell script "{}" with administrator privileges"#,
-            script.replace('\\', r"\\").replace('"', r#"\""#)
-        );
-
-        let on_progress = Arc::new(on_progress);
-
-        let mut child = std::process::Command::new("osascript")
-            .args(["-e", &osascript_arg])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| FlashError::Io(e))?;
+        {
+            let mut f = std::fs::File::create(&script_path).map_err(FlashError::Io)?;
+            f.write_all(script.as_bytes()).map_err(FlashError::Io)?;
+            // chmod +x
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&script_path)?.permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&script_path, perms)?;
+            }
+        }
 
         // Initial progress so UI shows it started
         on_progress(FlashProgress {
@@ -153,44 +164,73 @@ wait $DD_PID'"#,
             speed_bps: 0,
         });
 
-        // Parse dd SIGINFO output from stderr. dd prints lines like:
-        //   "1234567 bytes transferred in 1.2 secs (1023456 bytes/sec)"
-        // or "100+0 records in / 100+0 records out / 419430400 bytes transferred…"
-        if let Some(stderr) = child.stderr.take() {
-            let cb = Arc::clone(&on_progress);
-            let total = total_bytes;
+        let on_progress = Arc::new(on_progress);
+        let stop = Arc::new(AtomicBool::new(false));
+        let last_bytes_arc = Arc::new(AtomicU64::new(0));
+
+        // Background poller: read /tmp/sunburn-progress-PID and emit progress.
+        let poll_handle = {
+            let progress_path = progress_path.clone();
+            let on_progress = Arc::clone(&on_progress);
+            let stop = Arc::clone(&stop);
+            let last_bytes_arc = Arc::clone(&last_bytes_arc);
             std::thread::spawn(move || {
-                let reader = BufReader::new(stderr);
                 let mut last_bytes: u64 = 0;
-                let mut last_time = std::time::Instant::now();
-                for line in reader.lines().flatten() {
-                    if let Some(bytes) = parse_dd_bytes(&line) {
-                        let now = std::time::Instant::now();
-                        let elapsed = now.duration_since(last_time).as_secs_f64();
-                        let speed = if elapsed > 0.0 && bytes > last_bytes {
-                            ((bytes - last_bytes) as f64 / elapsed) as u64
-                        } else {
-                            0
-                        };
-                        last_bytes = bytes;
-                        last_time = now;
-                        cb(FlashProgress {
-                            bytes_written: bytes,
-                            total_bytes: total,
-                            speed_bps: speed,
-                        });
+                let mut last_time = Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(800));
+                    if let Ok(content) = std::fs::read_to_string(&progress_path) {
+                        // Find the most recent "N bytes transferred" line
+                        if let Some(line) = content.lines().rev().find(|l| l.contains("bytes transferred")) {
+                            if let Some(bytes) = parse_dd_bytes(line) {
+                                let now = Instant::now();
+                                let elapsed = now.duration_since(last_time).as_secs_f64();
+                                let speed = if elapsed > 0.0 && bytes > last_bytes {
+                                    ((bytes - last_bytes) as f64 / elapsed) as u64
+                                } else {
+                                    0
+                                };
+                                last_bytes = bytes;
+                                last_time = now;
+                                last_bytes_arc.store(bytes, Ordering::Relaxed);
+                                on_progress(FlashProgress {
+                                    bytes_written: bytes,
+                                    total_bytes,
+                                    speed_bps: speed,
+                                });
+                            }
+                        }
                     }
                 }
-            });
-        }
+            })
+        };
 
-        let status = child.wait().map_err(|e| FlashError::Io(e))?;
+        // Run the script with admin privileges via osascript
+        let osascript_arg = format!(
+            r#"do shell script "{}" with administrator privileges"#,
+            script_path
+        );
 
-        if !status.success() {
+        let output = std::process::Command::new("osascript")
+            .args(["-e", &osascript_arg])
+            .output()
+            .map_err(FlashError::Io)?;
+
+        // Stop the poller and clean up
+        stop.store(true, Ordering::Relaxed);
+        let _ = poll_handle.join();
+        let _ = std::fs::remove_file(&script_path);
+        let _ = std::fs::remove_file(&progress_path);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             // osascript exits 1 if user cancels admin prompt
-            return Err(FlashError::PermissionDenied(format!(
-                "admin auth cancelled or dd failed (exit {})",
-                status.code().unwrap_or(-1)
+            if stderr.contains("User canceled") || stderr.contains("(-128)") {
+                return Err(FlashError::PermissionDenied("admin auth cancelled".into()));
+            }
+            return Err(FlashError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("dd failed: {}", stderr.trim()),
             )));
         }
 
