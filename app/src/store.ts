@@ -27,7 +27,14 @@ const initial: WizardState = {
 export const [state, setState] = createStore<WizardState>(initial)
 
 export function resetWizard() {
-  setState(initial)
+  setState('imagePath', null)
+  setState('manifest', null)
+  setState('currentStep', 0)
+  setState('fieldValues', {})
+  setState('selectedDrive', null)
+  setState('flashProgress', null)
+  setState('flashLog', [])
+  setState('error', null)
 }
 
 // Compute total logical steps: SelectImage + manifest steps + SelectDrive + Confirm + Flashing + Done
