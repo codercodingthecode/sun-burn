@@ -103,146 +103,100 @@ impl Flasher {
     where
         F: Fn(FlashProgress) + Send + Sync + 'static,
     {
-        use std::io::Write;
-        use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+        use std::io::{Read, Write};
+        use std::process::Stdio;
         use std::time::{Duration, Instant};
 
         let disk = &self.dest_path;
         let raw_dest = to_raw_device(disk);
 
-        // Unmount the volumes on the disk before writing (no admin needed)
+        // Unmount all volumes on the disk (no admin needed)
         let _ = std::process::Command::new("diskutil")
             .args(["unmountDisk", disk])
             .output();
 
-        let pid = std::process::id();
-        let script_path = format!("/tmp/sunburn-flash-{}.sh", pid);
-        let progress_path = format!("/tmp/sunburn-progress-{}", pid);
-        let staged_image = format!("/tmp/sunburn-image-{}.img", pid);
-        let _ = std::fs::remove_file(&progress_path);
+        // Use macOS authopen to open the raw device with admin privileges via
+        // SecurityAgent. authopen prompts for password, opens the device, and
+        // forwards stdin → device. We pipe the image bytes through stdin and
+        // track progress per write.
+        let mut child = std::process::Command::new("/usr/libexec/authopen")
+            .args(["-w", &raw_dest])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(FlashError::Io)?;
 
-        // macOS TCC blocks osascript-elevated processes from reading user data
-        // directories (Downloads, Documents, Desktop). Stage the image into /tmp
-        // (no TCC restriction) so root-dd can read it.
-        std::fs::copy(&self.source_path, &staged_image).map_err(FlashError::Io)?;
-        let src = staged_image.clone();
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            FlashError::Io(std::io::Error::new(std::io::ErrorKind::Other, "no stdin"))
+        })?;
 
-        let script = format!(
-            r#"#!/bin/sh
-PROGRESS_FILE="{progress_path}"
-: > "$PROGRESS_FILE"
-dd if="{src}" of="{raw_dest}" bs=4m 2>>"$PROGRESS_FILE" &
-DD_PID=$!
-while kill -0 "$DD_PID" 2>/dev/null; do
-  sleep 1
-  kill -INFO "$DD_PID" 2>/dev/null
-done
-wait "$DD_PID"
-exit $?
-"#,
-            progress_path = progress_path,
-            src = src,
-            raw_dest = raw_dest,
-        );
+        // Open source and stream to authopen's stdin in 4MB chunks
+        let mut src_file = std::fs::File::open(&self.source_path).map_err(FlashError::Io)?;
+        let mut buf = vec![0u8; 4 * 1024 * 1024];
+        let mut bytes_written: u64 = 0;
+        let mut last_emit = Instant::now();
+        let mut bytes_since_last: u64 = 0;
+        let progress_interval = Duration::from_millis(500);
 
-        {
-            let mut f = std::fs::File::create(&script_path).map_err(FlashError::Io)?;
-            f.write_all(script.as_bytes()).map_err(FlashError::Io)?;
-            // chmod +x
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&script_path)?.permissions();
-                perms.set_mode(0o755);
-                std::fs::set_permissions(&script_path, perms)?;
-            }
-        }
-
-        // Initial progress so UI shows it started
+        // Initial progress
         on_progress(FlashProgress {
             bytes_written: 0,
             total_bytes,
             speed_bps: 0,
         });
 
-        let on_progress = Arc::new(on_progress);
-        let stop = Arc::new(AtomicBool::new(false));
-        let last_bytes_arc = Arc::new(AtomicU64::new(0));
-
-        // Background poller: read /tmp/sunburn-progress-PID and emit progress.
-        let poll_handle = {
-            let progress_path = progress_path.clone();
-            let on_progress = Arc::clone(&on_progress);
-            let stop = Arc::clone(&stop);
-            let last_bytes_arc = Arc::clone(&last_bytes_arc);
-            std::thread::spawn(move || {
-                let mut last_bytes: u64 = 0;
-                let mut last_time = Instant::now();
-                while !stop.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(800));
-                    if let Ok(content) = std::fs::read_to_string(&progress_path) {
-                        // Find the most recent "N bytes transferred" line
-                        if let Some(line) = content.lines().rev().find(|l| l.contains("bytes transferred")) {
-                            if let Some(bytes) = parse_dd_bytes(line) {
-                                let now = Instant::now();
-                                let elapsed = now.duration_since(last_time).as_secs_f64();
-                                let speed = if elapsed > 0.0 && bytes > last_bytes {
-                                    ((bytes - last_bytes) as f64 / elapsed) as u64
-                                } else {
-                                    0
-                                };
-                                last_bytes = bytes;
-                                last_time = now;
-                                last_bytes_arc.store(bytes, Ordering::Relaxed);
-                                on_progress(FlashProgress {
-                                    bytes_written: bytes,
-                                    total_bytes,
-                                    speed_bps: speed,
-                                });
-                            }
-                        }
-                    }
+        let write_result = (|| -> Result<(), FlashError> {
+            loop {
+                let n = src_file.read(&mut buf).map_err(FlashError::Io)?;
+                if n == 0 {
+                    break;
                 }
-            })
-        };
+                stdin.write_all(&buf[..n]).map_err(FlashError::Io)?;
+                bytes_written += n as u64;
+                bytes_since_last += n as u64;
 
-        // Run the script with admin privileges via osascript
-        let osascript_arg = format!(
-            r#"do shell script "{}" with administrator privileges"#,
-            script_path
-        );
+                let elapsed = last_emit.elapsed();
+                if elapsed >= progress_interval {
+                    let speed = if elapsed.as_secs_f64() > 0.0 {
+                        (bytes_since_last as f64 / elapsed.as_secs_f64()) as u64
+                    } else {
+                        0
+                    };
+                    on_progress(FlashProgress {
+                        bytes_written,
+                        total_bytes,
+                        speed_bps: speed,
+                    });
+                    last_emit = Instant::now();
+                    bytes_since_last = 0;
+                }
+            }
+            stdin.flush().map_err(FlashError::Io)?;
+            Ok(())
+        })();
 
-        let output = std::process::Command::new("osascript")
-            .args(["-e", &osascript_arg])
-            .output()
-            .map_err(FlashError::Io)?;
+        // Always close stdin so authopen can finish
+        drop(stdin);
 
-        // Stop the poller
-        stop.store(true, Ordering::Relaxed);
-        let _ = poll_handle.join();
+        let output = child.wait_with_output().map_err(FlashError::Io)?;
 
-        // Read dd's stderr from the progress file before cleanup
-        let dd_stderr = std::fs::read_to_string(&progress_path).unwrap_or_default();
-        let _ = std::fs::remove_file(&script_path);
-        let _ = std::fs::remove_file(&progress_path);
-        let _ = std::fs::remove_file(&staged_image);
+        if let Err(e) = write_result {
+            return Err(e);
+        }
 
         if !output.status.success() {
-            let osa_stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            // osascript exits 1 if user cancels admin prompt
-            if osa_stderr.contains("User canceled") || osa_stderr.contains("(-128)") {
-                return Err(FlashError::PermissionDenied("admin auth cancelled".into()));
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            // authopen exit codes: 1 = user cancelled, 35 = auth failed
+            if stderr.contains("denied") || stderr.contains("cancel") || output.status.code() == Some(1) {
+                return Err(FlashError::PermissionDenied(format!(
+                    "admin auth failed or cancelled: {}",
+                    stderr.trim()
+                )));
             }
-            // Pull the actual dd error from the progress file (last non-progress line)
-            let dd_err = dd_stderr
-                .lines()
-                .filter(|l| !l.contains("bytes transferred") && !l.contains("records"))
-                .filter(|l| !l.trim().is_empty())
-                .last()
-                .unwrap_or("(no error output)");
             return Err(FlashError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("dd: {} — osa: {}", dd_err.trim(), osa_stderr.trim()),
+                format!("authopen failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr.trim()),
             )));
         }
 
